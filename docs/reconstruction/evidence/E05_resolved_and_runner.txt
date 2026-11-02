@@ -1,0 +1,262 @@
+Historical tool output: resolved config excerpt and runner
+Source: /home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl:143
+Record timestamp (UTC): 2026-10-12T01:22:01.071Z
+
+Script completed
+Wall time 0.1 seconds
+Output:
+
+seed: 0
+trainer:
+  type: models.trainers.MultiTrainer_pbr
+  optim:
+    num_iters: 30000
+    use_grad_scaler: false
+    cache_buffer_freq: -1
+  render:
+    near_plane: 0.1
+    far_plane: 10000000000.0
+    antialiased: false
+    packed: false
+    absgrad: true
+    sparse_grad: false
+    batch_size: 1
+  losses:
+    rgb:
+      w: 0.7
+    ssim:
+      w: 0.3
+    mask:
+      w: 0.05
+      opacity_loss_type: bce
+    depth:
+      w: 0.01
+      inverse_depth: false
+      normalize: false
+      loss_type: l1
+    affine:
+      w: 0.001
+    albedo:
+      w: 0.5
+    metallic:
+      w: 0.2
+    roughness:
+      w: 0.2
+    normal:
+      w: 0.15
+    boundary:
+      enabled: true
+      start_step: 5000
+      ramp_steps: 1000
+      rgb_w: 0.0
+      gradient_w: 0.0
+      perceptual_w: 0.02
+      edge_threshold: 0.05
+      radius: 2
+      patch_size: 128
+      num_patches: 4
+      min_valid_fraction: 0.99
+  res_schedule:
+    double_steps: 250
+    downscale_times: 2
+  gaussian_optim_general_cfg:
+    xyz:
+      lr: 0.00016
+      lr_final: 1.6e-06
+      scale_factor: scene_radius
+    feature:
+      lr: 0.0025
+    mlp.raw:
+      lr: 0.0001
+    sh_dc:
+      lr: 0.0025
+    sh_rest:
+      lr: 0.000125
+    opacity:
+      lr: 0.05
+    scaling:
+      lr: 0.005
+    rotation:
+      lr: 0.001
+  gaussian_ctrl_general_cfg:
+    warmup_steps: 500
+    reset_alpha_interval: 3000
+    refine_interval: 100
+    sh_degree_interval: 1000
+    n_split_samples: 2
+    reset_alpha_value: 0.01
+    densify_grad_thresh: 0.0005
+    densify_size_thresh: 0.003
+    cull_alpha_thresh: 0.005
+    cull_scale_thresh: 0.5
+    cull_screen_size: 0.15
+    split_screen_size: 0.05
+    stop_screen_size_at: 4000
+    stop_split_at: 15000
+    sh_degree: 3
+model:
+  Background:
+39:    boundary:
+43:      rgb_w: 0.0
+44:      gradient_w: 0.0
+45:      perceptual_w: 0.02
+46:      edge_threshold: 0.05
+47:      radius: 2
+48:      patch_size: 128
+49:      num_patches: 4
+50:      min_valid_fraction: 0.99
+58:      scale_factor: scene_radius
+87:    stop_split_at: 15000
+90:  Background:
+119:    ctrl:
+120:      stop_split_at: 25000
+121:      stop_reset_at: 20000
+128:    ctrl:
+131:      stop_split_at: 20000
+175:    ctrl:
+179:      stop_split_at: 20000
+286:    ctrl:
+                    40000 if method == 'base_train_40k' else 30000,
+                )
+                self.assertEqual(cfg.trainer.render.antialiased,method=='antialias')
+                self.assertEqual(bool(OmegaConf.select(cfg,'trainer.render.boundary_renderer.enabled',default=False)),method in ('layered_pbr','pixel_sort'))
+                self.assertEqual(OmegaConf.select(cfg,'data.pixel_source.camera_motion.mode',default='frame'),
+                                 {'image_pose':'image','rolling_shutter':'rolling_shutter'}.get(method,'frame'))
+                background = OmegaConf.select(
+                    cfg, 'model.Background.ctrl', default=OmegaConf.create({})
+                )
+                general = cfg.trainer.gaussian_ctrl_general_cfg
+                bg_value = lambda key: OmegaConf.select(background, key, default=general[key])
+                combo_methods = (
+                    'combo_lpips_25k', 'combo_depth_02',
+                    'combo_boundary_grad_005', 'combo_perceptual_02',
+                )
+                self.assertEqual(
+                    bg_value('stop_split_at'),
+                    {'densify_late': 20000, 'densify_25k': 25000,
+                     **{name: 25000 for name in combo_methods}}.get(method, 15000),
+                )
+                self.assertEqual(bg_value('densify_grad_thresh'),
+                                 {'densify_threshold': .0003, 'densify_grad_04': .0004}.get(method, .0005))
+                self.assertEqual(bg_value('densify_size_thresh'),
+                                 .002 if method == 'densify_size_002' else .003)
+                self.assertEqual(bg_value('cull_alpha_thresh'),
+                                 .003 if method == 'cull_alpha_003' else .005)
+                self.assertEqual(OmegaConf.select(background, 'stop_reset_at', default=None),
+                                 20000 if method == 'opacity_reset_20k' or method in combo_methods else None)
+                self.assertEqual(
+                    OmegaConf.select(background, 'stop_cull_at', default=None),
+                    25000 if method == 'base_stop_prune_25k' else None,
+                )
+                self.assertEqual(cfg.trainer.losses.ssim.w,
+                                 (.25 if method == 'base_rgb075_ssim025' else
+                                  (.3 if method == 'ssim_03' or method in combo_methods else .2)))
+                self.assertEqual(cfg.trainer.losses.rgb.w,
+                                 (.75 if method == 'base_rgb075_ssim025' else
+                                  (.7 if method == 'ssim_03' or method in combo_methods else .8)))
+                self.assertEqual(cfg.trainer.losses.depth.w,
+                                 .02 if method == 'combo_depth_02' else .01)
+                gradient = OmegaConf.select(cfg, 'trainer.losses.boundary.gradient_w', default=0.)
+                self.assertEqual(gradient, .005 if method == 'combo_boundary_grad_005' else
+                                 (.02 if method == 'boundary_rgb' else 0.))
+                perceptual = OmegaConf.select(cfg, 'trainer.losses.boundary.perceptual_w', default=0.)
+                self.assertEqual(perceptual,
+                                 {'boundary_perceptual': .02,
+                                  'boundary_perceptual_light': .01,
+                                  'combo_lpips_25k': .01,
+                                  'combo_depth_02': .01,
+                                  'combo_boundary_grad_005': .01,
+                                  'combo_perceptual_02': .02,
+                                  'base_lpips_crop_256': .01,
+                                  'base_lpips_late_decay': .01}.get(method, 0.))
+                if method == 'base_lr_decay':
+                    self.assertEqual(cfg.model.Background.optim.feature.lr, .0025)
+                    self.assertEqual(cfg.model.Background.optim.feature.lr_final, .0005)
+                    self.assertEqual(cfg.model.Background.optim['mlp.raw'].lr_final, .00002)
+                if method == 'base_train_40k':
+                    self.assertEqual(cfg.trainer.optim.lr_schedule_max_steps, 30000)
+                if method == 'base_lpips_crop_256':
+                    self.assertEqual(cfg.trainer.losses.boundary.patch_size, 256)
+                    self.assertEqual(cfg.trainer.losses.boundary.num_patches, 1)
+                if method == 'base_lpips_late_decay':
+                    self.assertEqual(cfg.trainer.losses.boundary.perceptual_final_w, .005)
+                    self.assertEqual(cfg.trainer.losses.boundary.perceptual_decay_start, 25000)
+                    self.assertEqual(cfg.trainer.losses.boundary.perceptual_decay_steps, 5000)
+                if method == 'base_hard_frame_sampling':
+                    self.assertEqual(cfg.trainer.optim.cache_buffer_freq, 2000)
+                    self.assertTrue(cfg.trainer.optim.cache_buffer_train_only)
+                    self.assertEqual(cfg.data.pixel_source.sampler.buffer_ratio, .25)
+
+"""Resolve independent Base v3 boundary experiments; train only with --train."""
+import argparse
+from pathlib import Path
+import subprocess
+import sys
+from omegaconf import OmegaConf
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.train import load_config_with_base
+from models.boundary_losses import validate_boundary_config
+from models.gaussians.boundary_renderer import validate_boundary_renderer_config
+
+METHODS = (
+    'baseline', 'antialias', 'boundary_rgb', 'boundary_perceptual',
+    'boundary_perceptual_light', 'gbuffer_boundary', 'densify_late', 'densify_25k',
+    'combo_lpips_25k', 'combo_depth_02', 'combo_boundary_grad_005',
+    'combo_perceptual_02',
+    'base_lr_decay', 'base_train_40k', 'base_lpips_crop_256',
+    'base_lpips_late_decay', 'base_rgb075_ssim025',
+    'base_hard_frame_sampling', 'base_stop_prune_25k',
+    'densify_threshold', 'densify_grad_04', 'opacity_reset_20k',
+    'densify_size_002', 'ssim_03', 'cull_alpha_003', 'image_pose',
+    'rolling_shutter', 'layered_pbr', 'pixel_sort',
+)
+
+
+def experiment_config(scene, method):
+    if method not in METHODS:
+        raise ValueError(f'unknown method: {method}')
+    base = load_config_with_base(str(ROOT / 'configs/base_v3' / f'scene{int(scene):03d}.yaml'))
+    overlay = OmegaConf.load(ROOT / 'configs/base_v3_boundaries' / f'{method}.yaml')
+    del overlay['base_config']
+    cfg = OmegaConf.merge(base, overlay)
+    validate_boundary_config(cfg.trainer.losses.get('boundary'))
+    validate_boundary_config(cfg.trainer.losses.get('gbuffer_boundary'), gbuffer=True)
+    validate_boundary_renderer_config(cfg.trainer.render.get('boundary_renderer'))
+    return cfg
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--scene', type=int, choices=(23, 94, 114, 172, 788), default=788)
+    parser.add_argument('--method', choices=METHODS, required=True)
+    parser.add_argument('--output-root', default='output')
+    parser.add_argument('--train', action='store_true')
+    args = parser.parse_args()
+    cfg = experiment_config(args.scene, args.method)
+    if not args.train:
+        print(OmegaConf.to_yaml(cfg))
+        return
+    # Fail before dataset loading if image-time metadata is missing.
+    if args.method in ('image_pose', 'rolling_shutter'):
+        from datasets.waymo.camera_motion import load_motion_record
+        scene_dir = ROOT / cfg.data.data_root / f'{args.scene:03d}'
+        for frame in range(cfg.data.start_timestep, cfg.data.end_timestep+1):
+            for camera in cfg.data.pixel_source.cameras:
+                load_motion_record(scene_dir / 'camera_motion' / f'{frame:03d}_{camera}.json', frame, camera)
+    project = f'pbr/base_v3_boundaries/scene_{args.scene:03d}_100f'
+    directory = ROOT / args.output_root / project / args.method
+    if directory.exists() and any(directory.iterdir()):
+        raise FileExistsError(f'{directory} is not empty; use a different --output-root to keep runs separate')
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / 'experiment.yaml'
+    OmegaConf.save(cfg, path)
+    subprocess.run([sys.executable, '-u', 'tools/train.py', '--config_file', str(path),
+                    '--output_root', args.output_root, '--project', project, '--run_name', args.method,
+                    '--save_training_state'], cwd=ROOT, check=True)
+
+
+if __name__ == '__main__':
+    main()
+

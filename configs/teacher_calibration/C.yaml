@@ -1,0 +1,13 @@
+# IIF-inspired train-only correction of existing single-view material teachers.
+trainer:
+  teacher_calibration:
+    enabled: true
+    start_step: 3000
+    ramp_steps: 1000
+    lr: 0.001
+    max_gain_delta: 0.15
+    max_bias: 0.05
+    identity_w: 0.01
+    smooth_w: 0.01
+    max_gap: 2
+    min_opacity: 0.95

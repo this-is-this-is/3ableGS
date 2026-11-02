@@ -1,0 +1,9 @@
+# Initial 30-frame raw-only reconstruction dataset; 27 train / 3 held-out frames.
+# This retains Base v3's 30k schedule; smoke tests override num_iters explicitly.
+base_config: base.yaml
+
+data:
+  scene_idx: 788
+  end_timestep: 29
+  pixel_source:
+    gbuffer_path: data/waymo/render_png_788_single_static_30f/gbuffer_frames

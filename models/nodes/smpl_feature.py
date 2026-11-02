@@ -170,6 +170,7 @@ class SMPLNodes_feature(RigidNodes_feature):
         # self._features_dc = Parameter(shs[:, 0, :], requires_grad=not self.ctrl_cfg.freeze_shs_dc)
         # self._features_rest = Parameter(shs[:, 1:, :], requires_grad=not self.ctrl_cfg.freeze_shs_rest)
         self._features = Parameter(torch.zeros((self.num_points, self.feature_dim)).to(self.device))
+        self._initialize_correction_features()
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = self.get_gaussian_param_groups()
@@ -211,30 +212,10 @@ class SMPLNodes_feature(RigidNodes_feature):
         """
         assert means.shape[0] == self.point_ids.shape[0], \
             "its a bug here, we need to pass the mask for points_ids"
-        instance_mask = self.instances_fv[self.cur_frame]
-        if self.in_test_set and (
-                self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
-        ):
-            _prev_masked_theta = \
-            torch.cat((self.instances_quats[self.cur_frame - 1], self.smpl_qauts[self.cur_frame - 1]), dim=1)[
-                instance_mask]
-            _next_masked_theta = \
-            torch.cat((self.instances_quats[self.cur_frame + 1], self.smpl_qauts[self.cur_frame + 1]), dim=1)[
-                instance_mask]
-            _cur_masked_theta = \
-            torch.cat((self.instances_quats[self.cur_frame], self.smpl_qauts[self.cur_frame]), dim=1)[instance_mask]
-            interpolated_theta = interpolate_quats(_prev_masked_theta, _next_masked_theta)
-
-            inter_valid_mask = self.instances_fv[self.cur_frame - 1, instance_mask] & self.instances_fv[
-                self.cur_frame + 1, instance_mask]
-            masked_theta = torch.where(
-                inter_valid_mask[:, None, None], interpolated_theta, _cur_masked_theta
-            )
-        else:
-            theta = torch.cat(
-                (self.instances_quats[self.cur_frame], self.smpl_qauts[self.cur_frame]), dim=1
-            )
-            masked_theta = theta[instance_mask]
+        instance_mask = self.get_instance_valid_mask()
+        root = self._pose_at_current_frame(self.instances_quats, quaternion=True)
+        joints = self._pose_at_current_frame(self.smpl_qauts, quaternion=True)
+        masked_theta = torch.cat((root, joints), dim=1)[instance_mask]
         masked_theta = self.quat_act(masked_theta)
         W, A = self.template(
             masked_theta=masked_theta,
@@ -252,23 +233,10 @@ class SMPLNodes_feature(RigidNodes_feature):
         ) + t  # [N, 6890, 3]
 
         means_container = torch.zeros_like(reshaped_means)
-        means_container.index_add_(0, instance_mask.nonzero().squeeze(), deformed_means)
+        means_container.index_add_(0, instance_mask.nonzero(as_tuple=True)[0], deformed_means)
         means_container = means_container.reshape(-1, 3)
 
-        if self.in_test_set and (
-                self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
-        ):
-            _prev_ins_trans = self.instances_trans[self.cur_frame - 1]
-            _next_ins_trans = self.instances_trans[self.cur_frame + 1]
-            _cur_ins_trans = self.instances_trans[self.cur_frame]
-            interpolated_trans = (_prev_ins_trans + _next_ins_trans) * 0.5
-
-            inter_valid_mask = self.instances_fv[self.cur_frame - 1] & self.instances_fv[self.cur_frame + 1]
-            trans_cur_frame = torch.where(
-                inter_valid_mask[:, None], interpolated_trans, _cur_ins_trans
-            )
-        else:
-            trans_cur_frame = self.instances_trans[self.cur_frame]  # (num_instances, 3)
+        trans_cur_frame = self._pose_at_current_frame(self.instances_trans)
         trans_per_pts = trans_cur_frame[self.point_ids[..., 0]]
 
         # transform the means to world space
@@ -282,30 +250,10 @@ class SMPLNodes_feature(RigidNodes_feature):
         """
         assert means.shape[0] == self.point_ids.shape[0], \
             "its a bug here, we need to pass the mask for points_ids"
-        instance_mask = self.instances_fv[self.cur_frame]
-        if self.in_test_set and (
-                self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
-        ):
-            _prev_masked_theta = \
-            torch.cat((self.instances_quats[self.cur_frame - 1], self.smpl_qauts[self.cur_frame - 1]), dim=1)[
-                instance_mask]
-            _next_masked_theta = \
-            torch.cat((self.instances_quats[self.cur_frame + 1], self.smpl_qauts[self.cur_frame + 1]), dim=1)[
-                instance_mask]
-            _cur_masked_theta = \
-            torch.cat((self.instances_quats[self.cur_frame], self.smpl_qauts[self.cur_frame]), dim=1)[instance_mask]
-            interpolated_theta = interpolate_quats(_prev_masked_theta, _next_masked_theta)
-
-            inter_valid_mask = self.instances_fv[self.cur_frame - 1, instance_mask] & self.instances_fv[
-                self.cur_frame + 1, instance_mask]
-            masked_theta = torch.where(
-                inter_valid_mask[:, None, None], interpolated_theta, _cur_masked_theta
-            )
-        else:
-            theta = torch.cat(
-                (self.instances_quats[self.cur_frame], self.smpl_qauts[self.cur_frame]), dim=1
-            )
-            masked_theta = theta[instance_mask]
+        instance_mask = self.get_instance_valid_mask()
+        root = self._pose_at_current_frame(self.instances_quats, quaternion=True)
+        joints = self._pose_at_current_frame(self.smpl_qauts, quaternion=True)
+        masked_theta = torch.cat((root, joints), dim=1)[instance_mask]
         masked_theta = self.quat_act(masked_theta)
         W, A = self.template(
             masked_theta=masked_theta,
@@ -323,23 +271,10 @@ class SMPLNodes_feature(RigidNodes_feature):
         ) + t  # [N, 6890, 3]
 
         means_container = torch.zeros_like(reshaped_means)
-        means_container.index_add_(0, instance_mask.nonzero().squeeze(), deformed_means)
+        means_container.index_add_(0, instance_mask.nonzero(as_tuple=True)[0], deformed_means)
         means_container = means_container.reshape(-1, 3)
 
-        if self.in_test_set and (
-                self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
-        ):
-            _prev_ins_trans = self.instances_trans[self.cur_frame - 1]
-            _next_ins_trans = self.instances_trans[self.cur_frame + 1]
-            _cur_ins_trans = self.instances_trans[self.cur_frame]
-            interpolated_trans = (_prev_ins_trans + _next_ins_trans) * 0.5
-
-            inter_valid_mask = self.instances_fv[self.cur_frame - 1] & self.instances_fv[self.cur_frame + 1]
-            trans_cur_frame = torch.where(
-                inter_valid_mask[:, None], interpolated_trans, _cur_ins_trans
-            )
-        else:
-            trans_cur_frame = self.instances_trans[self.cur_frame]  # (num_instances, 3)
+        trans_cur_frame = self._pose_at_current_frame(self.instances_trans)
         trans_per_pts = trans_cur_frame[self.point_ids[..., 0]]
 
         # transform the means to world space
@@ -352,11 +287,11 @@ class SMPLNodes_feature(RigidNodes_feature):
             self.quat_act(reshaped_quats[instance_mask])
         )
         quats_container = torch.zeros_like(reshaped_quats)
-        quats_container.index_add_(0, instance_mask.nonzero().squeeze(), deformed_quats)
+        quats_container.index_add_(0, instance_mask.nonzero(as_tuple=True)[0], deformed_quats)
         # fill other with [1, 0, 0, 0]
-        quats_container.index_add_(0, (~instance_mask).nonzero().squeeze(),
+        quats_container.index_add_(0, (~instance_mask).nonzero(as_tuple=True)[0],
                                    torch.tensor([[[1., 0., 0., 0.]]], device=self.device).repeat((~instance_mask).sum(),
-                                                                                                 6890, 1))
+                                                                                                 self.smpl_points_num, 1))
         quats_container = quats_container.reshape(-1, 4)
         return means_container, quats_container
 
@@ -365,8 +300,9 @@ class SMPLNodes_feature(RigidNodes_feature):
         self.filter_mask = filter_mask
         # NOTE: hack here, need to consider a gaussian filter for efficient rendering
 
-        instance_mask = self.instances_fv[self.cur_frame]
+        instance_mask = self.get_instance_valid_mask()
         if instance_mask.sum() == 0:
+            self._raw_normal_residual_penalty = None
             return None
 
         if self.ball_gaussians:
@@ -385,7 +321,6 @@ class SMPLNodes_feature(RigidNodes_feature):
         #     rgbs = torch.clamp(rgbs + 0.5, 0.0, 1.0)
         # else:
         #     rgbs = torch.sigmoid(colors[:, 0, :])
-        rgbs = self.mlp_color[weather](self._features)
 
         valid_mask = self.get_pts_valid_mask()
 
@@ -395,7 +330,8 @@ class SMPLNodes_feature(RigidNodes_feature):
         else:
             activated_scales = torch.exp(self._scales)
         activated_rotations = self.quat_act(world_quats)
-        actovated_colors = rgbs
+        actovated_colors = self.gbuffer(
+            weather, activated_rotations, activated_scales, world_means, cam)
 
         # collect gaussians information
         gs_dict = dict(
@@ -405,6 +341,7 @@ class SMPLNodes_feature(RigidNodes_feature):
             _scales=activated_scales[filter_mask],
             _quats=activated_rotations[filter_mask],
         )
+        self._add_correction_payload(gs_dict, filter_mask)
         # check nan in gs_dict
         for k, v in gs_dict.items():
             if torch.isnan(v).any():
@@ -432,7 +369,9 @@ class SMPLNodes_feature(RigidNodes_feature):
         if temporal_smooth_reg is not None:
             joint_smooth_reg = temporal_smooth_reg.get("joint_smooth", None)
             if joint_smooth_reg is not None:
-                if self.cur_frame >= 1 and self.cur_frame < self.num_frames - 1:
+                if (self.cur_frame >= 1 and self.cur_frame < self.num_frames - 1
+                        and self._regularization_frames_are_training(
+                            self.cur_frame - 1, self.cur_frame, self.cur_frame + 1)):
                     valid_mask = (
                             self.instances_fv[self.cur_frame - 1] & \
                             self.instances_fv[self.cur_frame + 1] & \
@@ -490,7 +429,7 @@ class SMPLNodes_feature(RigidNodes_feature):
             nn_ind = self.nn_ind[instances_mask]  # (num_instances, smpl_points_num, knn_neighbors)
 
             if not self.ctrl_cfg.freeze_feature:
-                rgbs = self.mlp_color[weather](self._features)
+                rgbs = self.colors(weather)
                 valid_shs_dc = rgbs.reshape(self.num_instances, self.smpl_points_num, 3)[
                     instances_mask]  # (num_instances, smpl_points_num, 3)
                 nn_ind_expanded = nn_ind.unsqueeze(-1).expand(-1, -1, -1, 3)
@@ -675,7 +614,7 @@ class SMPLNodes_feature(RigidNodes_feature):
                     "_means": self._means[self.point_ids[..., 0] == id],
                     "_scales": self._scales[self.point_ids[..., 0] == id],
                     "_quats": self._quats[self.point_ids[..., 0] == id],
-                    "_features": self._features_dc[self.point_ids[..., 0] == id],
+                    "_features": self._features[self.point_ids[..., 0] == id],
                     "_opacities": self._opacities[self.point_ids[..., 0] == id],
                     "point_ids": self.point_ids[self.point_ids[..., 0] == id],
                     "instances_fv": self.instances_fv[:, id],
@@ -693,6 +632,8 @@ class SMPLNodes_feature(RigidNodes_feature):
                     }
                 }
                 gaussian_dict[id] = instance_raw_dict
+                if self.rgb_residual_enabled:
+                    instance_raw_dict["_correction_features"] = self._correction_features[self.point_ids[..., 0] == id]
         return gaussian_dict
 
     def remove_instances(self, remove_id_list: List[int]) -> None:
@@ -708,6 +649,7 @@ class SMPLNodes_feature(RigidNodes_feature):
             self._scales = Parameter(self._scales[mask])
             self._quats = Parameter(self._quats[mask])
             self._features = Parameter(self._features[mask])
+            self._filter_correction_features(mask)
             self._opacities = Parameter(self._opacities[mask])
             self.point_ids = self.point_ids[mask]
             ins_mask = torch.ones(self.num_instances, device=self.device, dtype=torch.bool)
@@ -739,6 +681,8 @@ class SMPLNodes_feature(RigidNodes_feature):
             # self._features_rest = Parameter(torch.cat([self._features_rest, new_gaussian["_features_rest"]], dim=0))
             # self._opacities = Parameter(torch.cat([self._opacities, new_gaussian["_opacities"]], dim=0))
             self._features.data[self.point_ids[..., 0] == ins_id] = new_gaussian["_features"]
+            if self.rgb_residual_enabled:
+                self._correction_features.data[self.point_ids[..., 0] == ins_id] = new_gaussian["_correction_features"]
             # keeps original point ids
             # self.point_ids = torch.cat([self.point_ids, torch.full_like(new_gaussian["point_ids"], ins_id)], dim=0)
             # self.template.add_instance(ins_id, new_gaussian["smpl_template"])

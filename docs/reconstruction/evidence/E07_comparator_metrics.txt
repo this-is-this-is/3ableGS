@@ -1,0 +1,54 @@
+Historical tool output: saved-results aggregation; comparison protocol must be revalidated
+Source: /home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl:81
+Record timestamp (UTC): 2026-10-12T01:13:20.627Z
+
+Script completed
+Wall time 0.1 seconds
+Output:
+
+SCENE TABLE
+023 combo 32.855487 0.952877 0.078459
+023 omnire 33.311955 0.951266 0.087678
+023 splatad 29.455497 0.950445 0.101215
+094 combo 29.537673 0.929113 0.155124
+094 omnire 26.384209 0.838277 0.178966
+094 splatad 34.753801 0.948435 0.129853
+114 combo 34.325097 0.961180 0.061376
+114 omnire 34.093976 0.955579 0.084120
+114 splatad 33.767602 0.961930 0.073462
+172 combo 31.960609 0.951956 0.072663
+172 omnire 32.080837 0.952445 0.078813
+172 splatad 33.494850 0.959322 0.080369
+788 combo 29.976967 0.922593 0.130123
+788 omnire 26.694921 0.863014 0.133581
+788 splatad 30.834125 0.927097 0.095243
+MEANS
+combo 31.731166 0.943544 0.099549
+omnire 30.513179 0.912116 0.112632
+splatad 32.461175 0.949446 0.096029
+WINS
+023 P omnire S combo L combo
+094 P splatad S splatad L splatad
+114 P combo S splatad L combo
+172 P splatad S splatad L combo
+788 P splatad S splatad L splatad
+MEAN DELTAS combo-minus
+omnire +1.217987 +0.031428 -0.013083
+splatad -0.730009 -0.005902 +0.003520
+per-scene combo vs each
+023
+omnire -0.456468 +0.001611 -0.009219
+splatad +3.399990 +0.002433 -0.022756
+094
+omnire +3.153464 +0.090836 -0.023841
+splatad -5.216129 -0.019322 +0.025271
+114
+omnire +0.231121 +0.005601 -0.022745
+splatad +0.557495 -0.000751 -0.012086
+172
+omnire -0.120229 -0.000489 -0.006150
+splatad -1.534242 -0.007367 -0.007706
+788
+omnire +3.282046 +0.059580 -0.003459
+splatad -0.857158 -0.004504 +0.034880
+

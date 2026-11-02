@@ -1,0 +1,7 @@
+Historical tool output: metrics JSON readback
+Source: /home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl:2008
+Record timestamp (UTC): 2026-10-15T06:43:31.278Z
+
+rain {'n_frames': 30, 'prompt_tokens_kept': 142, 'prompt_tokens_total': 142, 'clip_s': 0.8896484375, 'clip_ds': 0.08404541015625, 'sem_cs': 0.9464190607875874}
+snow {'n_frames': 30, 'prompt_tokens_kept': 155, 'prompt_tokens_total': 155, 'clip_s': 0.798828125, 'clip_ds': 0.06427001953125, 'sem_cs': 0.8989795352201563}
+

@@ -1,0 +1,11 @@
+# Matched Base v4 control. Pair acquisition is completely disabled by w=0.
+trainer:
+  losses:
+    temporal_material:
+      w: 0.0
+      start_step: 3000
+      max_gap: 2
+      interval: 8
+      ramp_steps: 1000
+      num_samples: 4096
+      seed: 20261101

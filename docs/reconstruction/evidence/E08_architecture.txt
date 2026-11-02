@@ -1,0 +1,255 @@
+Historical assistant explanation, cross-check against code/config during implementation
+Source: /home/user/.codex/sessions/2026/09/29/rollout-2026-09-29T13-13-59-01a0c78d-c043-7f90-888f-7a5809f85f34_01a0eb5e-968d-7742-bf28-2eeb3d735578.jsonl:149
+Record timestamp (UTC): 2026-09-29T04:21:35.251Z
+
+맞습니다. 다만 실제 Base v3에는 **재질 디코딩 전후와 최종 display 변환에 몇 가지 기술이 추가**되어 있습니다.
+
+엄밀히 구분하면:
+
+- **Base v2 → Base v3에서 추가:** Gaussian-local tangent normal + E3 camera response
+- **Base v1 → Base v3 전체 누적 변경:** R06 + R12 + R16 + local tangent + E3
+
+전체 경로는 다음과 같습니다.
+
+```text
+Gaussian feature f, 위치 x, rotation q, scale s
+        │
+        ├─ Material decoder
+        │    └─ albedo, metallic, roughness
+        │
+        ├─ Local-tangent normal head
+        │    └─ geometric normal → corrected shading normal
+        │
+        ▼
+[albedo, metallic, roughness, shading normal] G-buffer splatting
+        │
+        ▼
+학습된 HDR environment map + PBR shading
+        │
+        ▼
+surface radiance + sky/atmosphere 합성
+        │
+        ▼
+Reinhard → E3 monotonic camera response → sRGB
+        │
+        ▼
+기존 frame affine correction
+        │
+        ▼
+최종 RGB
+```
+
+### 1. R12: 위치 정보를 넣는 material decoder
+
+기본 구조는 말씀하신 것처럼 다음과 같습니다.
+
+\[
+f_i\;(32D)\rightarrow \mathrm{MLP}\rightarrow
+(\mathrm{albedo},\mathrm{metallic},\mathrm{roughness})
+\]
+
+Base v3의 **Background Gaussian**은 feature뿐 아니라 Gaussian의 월드 위치도 사용합니다.
+
+\[
+[f_i,\operatorname{stopgrad}(\hat{x}_i)]\;(35D)
+\rightarrow \mathrm{MLP}
+\rightarrow (a_i,m_i,r_i)
+\]
+
+여기서 위치는 scene 중심과 크기로 정규화해 `[-1,1]`로 제한합니다.
+
+- 같은 모양의 feature라도 도로, 건물, 하늘 근처처럼 **공간에 따라 다른 재질**을 표현할 수 있습니다.
+- xyz는 `detach`되어 있어서 material loss가 Gaussian 위치를 억지로 움직이지 않습니다.
+- Background에만 적용됩니다.
+- 차량, 사람 등의 Rigid/Deformable/SMPL Gaussian은 기존처럼 feature만 사용합니다.
+
+구현은 [feature.py](/home/user/Desktop/WeatherCity/models/gaussians/feature.py:543)에 있습니다.
+
+### 2. R16: LeakyReLU material decoder
+
+기존 material decoder의 활성화 함수는 ReLU였습니다.
+
+```text
+feature → Linear → ReLU → Linear → 5 material logits
+```
+
+Base v3에서는 모든 Gaussian 클래스의 raw material decoder를 다음처럼 변경했습니다.
+
+```text
+feature 또는 [feature, xyz]
+    → Linear
+    → LeakyReLU(negative_slope=0.01)
+    → Linear
+    → 5 material logits
+```
+
+ReLU에서 음수가 된 hidden unit의 gradient가 완전히 끊기는 문제를 줄이기 위한 변경입니다.
+
+최종 5개 출력은 sigmoid를 거쳐 다음 값이 됩니다.
+
+- Albedo: 3채널
+- Metallic: 1채널
+- Roughness: 1채널, 최솟값 0.01
+
+### 3. Gaussian-local tangent shading normal
+
+기본 파이프라인에서는 Gaussian의 rotation과 가장 얇은 scale 축으로부터 얻은 **geometry normal**을 그대로 PBR shading에 사용합니다.
+
+Base v3에서는 32D feature를 별도의 작은 normal head에 통과시킵니다.
+
+\[
+f_i \rightarrow \mathrm{MLP}_{normal}\rightarrow \Delta t_i
+\]
+
+이 출력을 Gaussian의 local tangent plane에 투영하고 Gaussian rotation으로 월드 좌표계에 옮깁니다.
+
+\[
+n_{s,i}
+=
+\operatorname{normalize}
+\left(
+n_{g,i}+R(q_i)\Delta t_i
+\right)
+\]
+
+- \(n_g\): Gaussian 모양에서 계산한 geometry normal
+- \(n_s\): PBR shading에 실제 사용하는 shading normal
+- \(\Delta t\): Gaussian local frame에서 정의한 tangent 보정
+- `max_tangent=0.5`: 최대 보정각 약 **26.6°**
+- 보정 크기에 `0.01` regularization 적용
+- Background, Rigid, Deformable, SMPL에 모두 적용
+
+따라서 **Gaussian의 실제 geometry를 바꾸지 않고 빛 반응 방향만 보정**할 수 있습니다. 차량이나 사람이 회전하면 tangent normal도 Gaussian과 함께 회전하므로 view와 motion에 대해 일관됩니다.
+
+다만 한 Gaussian당 normal 하나를 예측하므로, Gaussian 내부 위치에 따른 normal 변화까지 표현하는 방식은 아닙니다. 구현은 [feature.py](/home/user/Desktop/WeatherCity/models/gaussians/feature.py:574)에 있습니다.
+
+### 4. G-buffer Gaussian splatting
+
+Gaussian마다 다음 8개 값을 묶어 rasterization합니다.
+
+\[
+[a_r,a_g,a_b,m,r,n_x,n_y,n_z]
+\]
+
+화면에 alpha compositing한 다음 누적 opacity로 나눠 픽셀별 G-buffer를 얻습니다.
+
+```text
+Pixel G-buffer
+├─ albedo
+├─ metallic
+├─ roughness
+└─ corrected shading normal
+```
+
+그 뒤에만 environment map과 PBR shading이 적용됩니다. 즉, 재질을 Gaussian별로 shading한 후 RGB를 splat하는 구조가 아니라 **재질과 normal을 splat해서 pixel G-buffer를 만든 뒤 pixel 단위로 shading**합니다.
+
+구현은 [scene_graph_pbr.py](/home/user/Desktop/WeatherCity/models/trainers/scene_graph_pbr.py:145)에 있습니다.
+
+### 5. E3: Shared monotonic camera response
+
+PBR shading 결과는 linear HDR radiance입니다. 기존에는 이를 고정된 변환으로 RGB 이미지로 만들었습니다.
+
+```text
+linear radiance
+→ Reinhard tone mapping
+→ sRGB transfer
+```
+
+Base v3에서는 Reinhard와 sRGB 사이에 학습 가능한 9-knot response curve를 넣습니다.
+
+```text
+linear radiance
+→ Reinhard
+→ 9-knot monotonic response
+→ sRGB
+→ 기존 Affine
+```
+
+특징은 다음과 같습니다.
+
+- RGB 세 채널이 같은 curve를 공유
+- 모든 frame과 weather가 같은 curve를 공유
+- frame별 embedding이나 exposure parameter 없음
+- `(0,0)`, `(0.5,0.5)`, `(1,1)` 고정
+- 최소 slope `0.05`로 단조 증가 보장
+- identity regularization `0.001`
+- smoothness regularization `0.001`
+- identity curve로 초기화
+
+따라서 E3는 environment map이나 재질을 직접 바꾸는 모듈이 아니라, **물리적으로 계산된 linear radiance와 실제 카메라 영상의 비선형 밝기 응답 차이**를 흡수합니다.
+
+\[
+I_{\mathrm{pred}}
+=
+\operatorname{sRGB}
+\left(
+C_\theta\left(
+\frac{L}{1+L}
+\right)
+\right)
+\]
+
+여기서 \(L\)은 PBR linear radiance이고 \(C_\theta\)가 학습된 monotonic response입니다.
+
+구현은 [camera_response.py](/home/user/Desktop/WeatherCity/models/camera_response.py:1)에 있습니다.
+
+### 6. R06: Camera pose 고정
+
+Base v3에서는 프레임별 CamPose optimization의 learning rate를 0으로 둡니다.
+
+- 제공된 dataset camera pose를 그대로 사용합니다.
+- train frame에만 맞는 pose correction으로 RGB를 개선하는 현상을 막습니다.
+- held-out frame에는 학습된 pose 보정이 없어서 생기는 train/test 불일치를 줄입니다.
+
+이 부분은 새로운 렌더링 모듈이라기보다 **학습 정책 변경**입니다.
+
+### Base v3를 식으로 정리하면
+
+Background material은:
+
+\[
+(a_i,m_i,r_i)
+=
+\sigma\left(
+D_{\mathrm{LeakyReLU}}
+\left[
+f_i,\operatorname{detach}(\hat{x}_i)
+\right]
+\right)
+\]
+
+Shading normal은:
+
+\[
+n_{s,i}=
+\operatorname{normalize}
+\left(n_{g,i}+R(q_i)\Delta t_i\right)
+\]
+
+최종 pixel은:
+
+\[
+I=
+\mathrm{Affine}_{frame}
+\left[
+\operatorname{sRGB}
+\left(
+C_\theta
+\left(
+\operatorname{Reinhard}
+\left(
+\mathrm{PBR}(G,\mathrm{Env})
++\mathrm{Sky}
+\right)
+\right)
+\right)
+\right]
+\]
+
+결국 Base v3의 핵심은 다음 세 가지입니다.
+
+1. **재질 표현 개선:** feature에 위치 정보를 추가하고 LeakyReLU 사용  
+2. **빛 반응 방향 개선:** geometry normal과 별도의 local-tangent shading normal 학습  
+3. **카메라 영상 형성 보정:** PBR radiance 뒤에 공유 monotonic response 학습  
+
+실험상 두 장면에서 일관된 RGB 향상을 만든 부분은 **3번 E3**였고, local tangent는 Scene 788에서는 확실히 좋아졌지만 Scene 114에서는 단독 효과가 혼합적이었습니다. Base v3에서는 둘을 함께 사용합니다.

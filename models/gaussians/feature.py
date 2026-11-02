@@ -14,6 +14,7 @@ Original paper: https://arxiv.org/abs/2308.04079
 """
 
 from typing import Dict, List, Tuple
+from contextlib import contextmanager
 from omegaconf import OmegaConf
 import logging
 
@@ -35,6 +36,9 @@ class FeatureGaussians(nn.Module):
             reg: OmegaConf = None,
             networks: OmegaConf = None,
             feature: OmegaConf = None,
+            raw_material: OmegaConf = None,
+            weather_material: OmegaConf = None,
+            rgb_residual: OmegaConf = None,
             weathers: list[str] = ["raw"],
             scene_scale: float = 30.,
             scene_origin: torch.Tensor = torch.zeros(3),
@@ -43,6 +47,7 @@ class FeatureGaussians(nn.Module):
             **kwargs
     ):
         super().__init__()
+        self.class_name = class_name
         self.class_prefix = class_name + "#"
         self.ctrl_cfg = ctrl
         self.reg_cfg = reg
@@ -53,7 +58,7 @@ class FeatureGaussians(nn.Module):
         self.num_train_images = num_train_images
         self.step = 0
 
-        self.device = device
+        self.device = torch.device(device)
         self.ball_gaussians = self.ctrl_cfg.get("ball_gaussians", False)
         self.gaussian_2d = self.ctrl_cfg.get("gaussian_2d", False)
         self.feature_dim = self.feature_cfg.get("feature_dim", 32)
@@ -77,12 +82,35 @@ class FeatureGaussians(nn.Module):
         self._opacities = torch.zeros(1, 1, device=self.device)
         self._features = torch.zeros(1, self.feature_dim, device=self.device)
 
-        self.mlp_color = nn.ModuleDict({w : nn.Sequential(
-            nn.Linear(self.feature_dim, self.feature_dim),
-            nn.ReLU(True),
-            nn.Linear(self.feature_dim, 3),
-            nn.Sigmoid()
-        ) for w in self.weathers}).to(self.device)
+        # A raw_material block selects the reconstructed PBR contract. Existing
+        # WeatherCity RGB configurations retain their original decoder and RNG.
+        self.pbr_enabled = raw_material is not None
+        self.raw_material_cfg = raw_material if raw_material is not None else {}
+        self.raw_normal_residual = None
+        self._raw_normal_residual_penalty = None
+        self.raw_normal_residual_regularization_weight = 0.0
+        if self.pbr_enabled:
+            self._init_raw_material()
+        else:
+            self.mlp_color = nn.ModuleDict({w: nn.Sequential(
+                nn.Linear(self.feature_dim, self.feature_dim),
+                nn.ReLU(True),
+                nn.Linear(self.feature_dim, 3),
+                nn.Sigmoid()
+            ) for w in self.weathers}).to(self.device)
+
+        self._init_weather_material(weather_material)
+        residual_cfg = rgb_residual if rgb_residual is not None else {}
+        self.rgb_residual_enabled = residual_cfg.get("enabled", False)
+        if type(self.rgb_residual_enabled) is not bool:
+            raise ValueError("rgb_residual.enabled must be boolean")
+        self.correction_feature_dim = residual_cfg.get("feature_dim", 8)
+        if type(self.correction_feature_dim) is not int or self.correction_feature_dim < 1:
+            raise ValueError("rgb_residual.feature_dim must be a positive integer")
+        if self.rgb_residual_enabled:
+            if not self.pbr_enabled:
+                raise ValueError("RGB residual features require a raw PBR material model")
+            self._initialize_correction_features()
 
         # self._features_rest = torch.zeros(1, num_sh_bases(self.sh_degree) - 1, 3, device=self.device)
         # self._features_rest = torch.zeros(1, 3, device=self.device)
@@ -90,6 +118,286 @@ class FeatureGaussians(nn.Module):
     @property
     def sh_degree(self):
         return self.ctrl_cfg.sh_degree
+
+    def _initialize_correction_features(self):
+        if self.rgb_residual_enabled:
+            self._correction_features = Parameter(
+                self._means.new_zeros(self.num_points, self.correction_feature_dim))
+
+    def _densify_correction_features(self, splits, dups, nsamps):
+        if self.rgb_residual_enabled:
+            values = self._correction_features.detach()
+            self._correction_features = Parameter(torch.cat(
+                [values, values[splits].repeat(nsamps, 1), values[dups]], dim=0))
+
+    def _filter_correction_features(self, keep):
+        if self.rgb_residual_enabled:
+            self._correction_features = Parameter(self._correction_features[keep].detach())
+
+    def _add_correction_payload(self, gs_dict, mask):
+        if self.rgb_residual_enabled:
+            gs_dict["_correction_features"] = self._correction_features[mask]
+
+    @contextmanager
+    def _fork_isolated_rng(self, seed: int):
+        devices = []
+        if self.device.type == "cuda":
+            devices = [self.device.index if self.device.index is not None
+                       else torch.cuda.current_device()]
+        with torch.random.fork_rng(devices=devices, enabled=True):
+            torch.manual_seed(seed)
+            if self.device.type == "cuda":
+                torch.cuda.manual_seed(seed)
+            yield
+
+    def _init_raw_material(self):
+        """Restore Base v3's raw decoder and zero-initialized normal head."""
+        if self.weathers != ["raw"]:
+            raise ValueError("Phase 3 PBR reconstruction supports weathers=['raw']")
+        # Construct the legacy PBR MLP first, preserving historical global RNG
+        # consumption; spatial and normal heads use isolated streams below.
+        self.mlp_material = nn.ModuleDict({"raw": nn.Sequential(
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.ReLU(True),
+            nn.Linear(self.feature_dim, 5),
+        )}).to(self.device)
+        spatial_cfg = self.raw_material_cfg.get("spatial_xyz", {})
+        self.raw_spatial_xyz_enabled = bool(spatial_cfg.get("enabled", False))
+        if spatial_cfg.get("fourier", {}).get("enabled", False):
+            raise ValueError("Fourier material inputs are outside Base v3 reconstruction")
+        decoder_cfg = self.raw_material_cfg.get("decoder", {})
+        if (int(decoder_cfg.get("hidden_dim", self.feature_dim)) != self.feature_dim
+                or int(decoder_cfg.get("num_hidden_layers", 1)) != 1
+                or decoder_cfg.get("branch_mode", "shared") != "shared"):
+            raise ValueError("Base v3 uses a shared decoder with one feature_dim hidden layer")
+        activation = str(decoder_cfg.get("activation", "relu"))
+        negative_slope = float(decoder_cfg.get("negative_slope", 0.01))
+        if activation not in {"relu", "leaky_relu"}:
+            raise ValueError(f"Unsupported raw material activation: {activation}")
+        if not math.isfinite(negative_slope) or negative_slope <= 0:
+            raise ValueError("Material negative_slope must be finite and positive")
+        def make_activation():
+            return (nn.LeakyReLU(negative_slope, inplace=True)
+                    if activation == "leaky_relu" else nn.ReLU(True))
+        if self.raw_spatial_xyz_enabled:
+            with self._fork_isolated_rng(int(spatial_cfg.get("seed", 12012))):
+                self.mlp_material["raw"] = nn.Sequential(
+                    nn.Linear(self.feature_dim + 3, self.feature_dim),
+                    make_activation(),
+                    nn.Linear(self.feature_dim, 5),
+                ).to(self.device)
+        elif activation == "leaky_relu":
+            self.mlp_material["raw"][1] = make_activation()
+
+        normal_cfg = self.raw_material_cfg.get("normal_residual", {})
+        self.raw_normal_residual_enabled = bool(normal_cfg.get("enabled", False))
+        self.raw_normal_residual_space = str(normal_cfg.get("space", "world_tangent"))
+        if self.raw_normal_residual_space not in {"world_tangent", "gaussian_local_tangent"}:
+            raise ValueError(f"Unsupported raw normal space: {self.raw_normal_residual_space}")
+        max_angle_deg = float(normal_cfg.get("max_angle_deg", 10.0))
+        if not 0 < max_angle_deg < 90:
+            raise ValueError("Normal residual max_angle_deg must be in (0, 90)")
+        self.raw_normal_residual_max_tangent = float(normal_cfg.get(
+            "max_tangent", math.tan(math.radians(max_angle_deg))))
+        if (not math.isfinite(self.raw_normal_residual_max_tangent)
+                or self.raw_normal_residual_max_tangent <= 0):
+            raise ValueError("Normal residual max_tangent must be finite and positive")
+        self.raw_normal_residual_regularization_weight = float(
+            normal_cfg.get("regularization_weight", 0.0))
+        if (not math.isfinite(self.raw_normal_residual_regularization_weight)
+                or self.raw_normal_residual_regularization_weight < 0):
+            raise ValueError("Normal residual regularization must be finite and nonnegative")
+        self._raw_normal_residual_active = True
+        if self.raw_normal_residual_enabled:
+            hidden_dim = int(normal_cfg.get("hidden_dim", self.feature_dim))
+            if hidden_dim <= 0:
+                raise ValueError("Normal residual hidden_dim must be positive")
+            with self._fork_isolated_rng(int(normal_cfg.get("seed", 15015))):
+                self.raw_normal_residual = nn.Sequential(
+                    nn.Linear(self.feature_dim, hidden_dim),
+                    nn.ReLU(True),
+                    nn.Linear(hidden_dim, 3),
+                ).to(self.device)
+                nn.init.zeros_(self.raw_normal_residual[-1].weight)
+                nn.init.zeros_(self.raw_normal_residual[-1].bias)
+
+    @staticmethod
+    def _activate_material_logits(logits):
+        return (torch.sigmoid(logits[..., :3]),
+                torch.sigmoid(logits[..., 3:4]),
+                torch.sigmoid(logits[..., 4:5]) * 0.99 + 0.01)
+
+    def _raw_material_input(self, means=None):
+        if not self.raw_spatial_xyz_enabled:
+            return self._features
+        means = self._means if means is None else means
+        if means.shape != self._means.shape:
+            raise ValueError("Spatial XYZ must match Gaussian feature rows")
+        origin = torch.as_tensor(self.scene_origin, device=means.device, dtype=means.dtype)
+        scale = max(float(self.scene_scale), 1e-6)
+        xyz = ((means.detach() - origin) / scale).clamp(-1.0, 1.0)
+        return torch.cat([self._features, xyz], dim=-1)
+
+    def _init_weather_material(self, weather_material=None):
+        """Attach residual decoders without changing the raw scene topology."""
+        cfg = weather_material if weather_material is not None else {}
+        self.weather_material_enabled = bool(cfg.get("enabled", False))
+        self.weather_material_decoders = nn.ModuleDict()
+        if self.weather_material_enabled:
+            if not self.pbr_enabled or self.class_name != "Background":
+                raise ValueError("Weather material residuals require PBR Background")
+            from models.weather_material import WeatherMaterialDecoder
+            residual_weathers = list(cfg.get("weathers", []))
+            if not residual_weathers or "raw" in residual_weathers:
+                raise ValueError("Weather residuals require non-raw weather names")
+            if len(set(residual_weathers)) != len(residual_weathers):
+                raise ValueError("Weather residual names must be unique")
+            for weather in residual_weathers:
+                self.weather_material_decoders[weather] = WeatherMaterialDecoder(
+                    feature_dim=self.feature_dim,
+                    hidden_dim=cfg.get("hidden_dim", self.feature_dim),
+                    num_hidden_layers=cfg.get("num_hidden_layers", 1),
+                    albedo_delta_cap=cfg.get("albedo_delta_cap", 4.0),
+                    roughness_delta_cap=cfg.get("roughness_delta_cap", 5.0),
+                )
+        self.weather_material_decoders.to(self.device)
+        world_up = torch.as_tensor(
+            cfg.get("world_up", [0.0, 0.0, 1.0]),
+            dtype=torch.float32, device=self.device,
+        )
+        if world_up.shape != (3,) or not torch.isfinite(world_up).all():
+            raise ValueError("world_up must be a finite 3-vector")
+        if world_up.norm() <= 0:
+            raise ValueError("world_up must be non-zero")
+        self.register_buffer("_weather_world_up", world_up / world_up.norm(), persistent=False)
+        self._weather_detach_inputs = bool(cfg.get("detach_inputs", True))
+        self._weather_material_strength = 1.0
+        self._weather_material_outputs = {}
+
+    def _normal_upness(self, preflip_normal):
+        """Sign-invariant geometry alignment, before tangent/camera correction."""
+        if preflip_normal.shape[-1] != 3:
+            raise ValueError("preflip_normal must end in 3 channels")
+        world_up = self._weather_world_up.to(dtype=preflip_normal.dtype)
+        return torch.abs((preflip_normal * world_up).sum(-1, keepdim=True)).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _validate_weather_material_strength(strength):
+        strength = float(strength)
+        if not math.isfinite(strength) or strength < 0.0:
+            raise ValueError("Weather material strength must be finite and nonnegative")
+        return strength
+
+    def set_weather_material_strength(self, strength=1.0):
+        self._weather_material_strength = self._validate_weather_material_strength(strength)
+
+    def material_outputs(self, weather="raw", preflip_normal=None,
+                         weather_strength=None, means=None):
+        if not self.pbr_enabled:
+            raise RuntimeError("Material decoding requires a raw_material configuration")
+        if weather not in self.weathers and weather not in self.weather_material_decoders:
+            raise KeyError(f"Weather {weather!r} is not configured")
+        self._weather_material_outputs.pop(weather, None)
+        base_logits = self.mlp_material["raw"](self._raw_material_input(means))
+        base_albedo, base_metallic, base_roughness = self._activate_material_logits(base_logits)
+        outputs = {
+            "base_albedo": base_albedo, "base_metallic": base_metallic,
+            "base_roughness": base_roughness,
+            "albedo": base_albedo, "metallic": base_metallic,
+            "roughness": base_roughness,
+            "delta_albedo_logit": torch.zeros_like(base_albedo),
+            "delta_roughness_logit": torch.zeros_like(base_roughness),
+        }
+        if weather == "raw" or weather not in self.weather_material_decoders:
+            return outputs
+        strength = self._validate_weather_material_strength(
+            self._weather_material_strength if weather_strength is None else weather_strength)
+        if strength == 0.0:
+            return outputs
+        if preflip_normal is None:
+            preflip_normal = gaussian_normals(self.get_quats, self.get_scaling)
+        upness = self._normal_upness(preflip_normal)
+        decoder_inputs = (self._features, base_albedo, base_metallic, base_roughness, upness)
+        if self._weather_detach_inputs:
+            decoder_inputs = tuple(value.detach() for value in decoder_inputs)
+        residual = self.weather_material_decoders[weather](*decoder_inputs)
+        # Applying to the original logits retains exact identity at zero delta.
+        residual_base_logits = base_logits.detach() if self._weather_detach_inputs else base_logits
+        outputs.update({
+            "albedo": torch.sigmoid(residual_base_logits[..., :3]
+                                    + strength * residual["delta_albedo_logit"]),
+            "metallic": base_metallic.detach() if self._weather_detach_inputs else base_metallic,
+            "roughness": torch.sigmoid(residual_base_logits[..., 4:5]
+                                       + strength * residual["delta_roughness_logit"]) * 0.99 + 0.01,
+            **residual, "upness": upness,
+        })
+        self._weather_material_outputs[weather] = residual
+        return outputs
+
+    def materials(self, weather="raw", means=None, preflip_normal=None, weather_strength=None):
+        outputs = self.material_outputs(weather, preflip_normal, weather_strength, means)
+        return outputs["albedo"], outputs["metallic"], outputs["roughness"]
+
+    def get_weather_material_outputs(self, weather):
+        return self._weather_material_outputs.get(weather)
+
+    def pop_weather_material_outputs(self, weather):
+        return self._weather_material_outputs.pop(weather, None)
+
+    def clear_weather_material_outputs(self, weather=None):
+        if weather is None:
+            self._weather_material_outputs.clear()
+        else:
+            self._weather_material_outputs.pop(weather, None)
+
+    def get_weather_material_parameters(self, weather):
+        if weather not in self.weather_material_decoders:
+            return tuple()
+        return tuple(self.weather_material_decoders[weather].parameters())
+
+    def _apply_raw_normal_residual(self, preflip_normal, quats=None, scales=None):
+        if self.raw_normal_residual is None or not self._raw_normal_residual_active:
+            self._raw_normal_residual_penalty = None
+            return preflip_normal
+        raw_delta = self.raw_normal_residual(self._features)
+        if self.raw_normal_residual_space == "gaussian_local_tangent":
+            if quats is None or scales is None:
+                raise ValueError("gaussian_local_tangent requires quats and scales")
+            rotation = quat_to_rotmat(quats)
+            normal_axis = torch.nn.functional.one_hot(
+                scales.argmin(dim=-1), num_classes=3).to(raw_delta)
+            bounded = self.raw_normal_residual_max_tangent * raw_delta / torch.sqrt(
+                1.0 + raw_delta.square().sum(dim=-1, keepdim=True))
+            local_tangent = bounded - normal_axis * (bounded * normal_axis).sum(-1, keepdim=True)
+            tangent = torch.bmm(rotation, local_tangent.unsqueeze(-1)).squeeze(-1)
+            self._raw_normal_residual_penalty = local_tangent.square().sum(-1).mean()
+        else:
+            tangent = raw_delta - (raw_delta * preflip_normal).sum(-1, keepdim=True) * preflip_normal
+            factor = (self.raw_normal_residual_max_tangent
+                      / tangent.norm(dim=-1, keepdim=True).clamp_min(1e-8)).clamp(max=1.0)
+            tangent = tangent * factor
+            self._raw_normal_residual_penalty = tangent.square().sum(-1).mean()
+        return torch.nn.functional.normalize(preflip_normal + tangent, dim=-1)
+
+    def set_raw_normal_residual_active(self, active):
+        previous = self._raw_normal_residual_active
+        self._raw_normal_residual_active = bool(active)
+        return previous
+
+    def gbuffer(self, weather, quats, scales, means=None, cam=None, weather_strength=None):
+        """Pack A3/M1/R1/N3 using final world-space node rotations."""
+        if not self.pbr_enabled:
+            return self.colors(weather)
+        preflip_normal = gaussian_normals(quats, scales)
+        albedo, metallic, roughness = self.materials(
+            weather, means=means, preflip_normal=preflip_normal,
+            weather_strength=weather_strength)
+        normals = self._apply_raw_normal_residual(
+            preflip_normal, quats=quats, scales=scales)
+        if means is not None and cam is not None:
+            towards_cam = cam.camtoworlds[:3, 3].reshape(1, 3) - means
+            normals = normals * torch.sign((normals * towards_cam).sum(-1, keepdim=True) + 1e-8)
+        return torch.cat([albedo, metallic, roughness, normals], dim=-1)
 
     def create_from_pcd(self, init_means: torch.Tensor, init_colors: torch.Tensor) -> None:
         self._means = Parameter(init_means)
@@ -108,9 +416,12 @@ class FeatureGaussians(nn.Module):
         self._quats = Parameter(random_quat_tensor(self.num_points).to(self.device))
 
         self._features = Parameter(torch.zeros((self.num_points, self.feature_dim)).to(self.device))
+        self._initialize_correction_features()
         self._opacities = Parameter(torch.logit(0.1 * torch.ones(self.num_points, 1, device=self.device)))
 
     def colors(self, weather):
+        if self.pbr_enabled:
+            return self.materials(weather)[0]
         return self.mlp_color[weather](self._features)
         # if self.sh_degree > 0:
         #     return SH2RGB(self._features_dc)
@@ -159,6 +470,9 @@ class FeatureGaussians(nn.Module):
 
     def preprocess_per_train_step(self, step: int):
         self.step = step
+        # Some node classes can be absent in the current frame. Never carry a
+        # normal-head graph from the previous frame into their regularizers.
+        self._raw_normal_residual_penalty = None
 
     def postprocess_per_train_step(
             self,
@@ -203,14 +517,23 @@ class FeatureGaussians(nn.Module):
             )
 
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
-        return {
+        decoders = self.mlp_material if self.pbr_enabled else self.mlp_color
+        groups = {
             self.class_prefix + "xyz": [self._means],
             self.class_prefix + "feature": [self._features],
             self.class_prefix + "opacity": [self._opacities],
             self.class_prefix + "scaling": [self._scales],
             self.class_prefix + "rotation": [self._quats],
-            **{self.class_prefix + "mlp." + w: self.mlp_color[w].parameters() for w in self.weathers},
+            **{self.class_prefix + "mlp." + w: decoder.parameters()
+               for w, decoder in decoders.items()},
         }
+        if self.raw_normal_residual is not None:
+            groups[self.class_prefix + "mlp.raw.normal_residual"] = self.raw_normal_residual.parameters()
+        if self.rgb_residual_enabled:
+            groups[self.class_prefix + "correction_feature"] = [self._correction_features]
+        groups.update({self.class_prefix + "weather_mlp." + weather: decoder.parameters()
+                       for weather, decoder in self.weather_material_decoders.items()})
+        return groups
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         return self.get_gaussian_param_groups()
@@ -263,6 +586,8 @@ class FeatureGaussians(nn.Module):
                     dup_quats,
                 ) = self.dup_gaussians(dups)
 
+                self._densify_correction_features(splits, dups, nsamps)
+
                 self._means = Parameter(torch.cat([self._means.detach(), split_means, dup_means], dim=0))
                 # self.colors_all = Parameter(torch.cat([self.colors_all.detach(), split_colors, dup_colors], dim=0))
 
@@ -296,7 +621,10 @@ class FeatureGaussians(nn.Module):
             print(f"Class {self.class_prefix} left points: {self.num_points}")
 
             # reset opacity
-            if self.step % reset_interval == self.ctrl_cfg.refine_interval:
+            if (
+                self.step % reset_interval == self.ctrl_cfg.refine_interval
+                and self.opacity_reset_is_active()
+            ):
                 # NOTE: in nerfstudio, reset_value = cull_alpha_thresh * 0.8
                 # we align to original repo of gaussians spalting
                 reset_value = torch.min(self.get_opacity.data,
@@ -312,6 +640,11 @@ class FeatureGaussians(nn.Module):
             self.xys_grad_norm = None
             self.vis_counts = None
             self.max_2Dsize = None
+
+    def opacity_reset_is_active(self) -> bool:
+        """Whether scheduled opacity resets are still enabled at this step."""
+        stop_reset_at = self.ctrl_cfg.get("stop_reset_at", None)
+        return stop_reset_at is None or self.step < stop_reset_at
 
     def cull_gaussians(self):
         """
@@ -336,6 +669,7 @@ class FeatureGaussians(nn.Module):
         self._quats = Parameter(self._quats[~culls].detach())
         # self.colors_all = Parameter(self.colors_all[~culls].detach())
         self._features = Parameter(self._features[~culls].detach())
+        self._filter_correction_features(~culls)
 
         self._opacities = Parameter(self._opacities[~culls].detach())
 
@@ -402,12 +736,12 @@ class FeatureGaussians(nn.Module):
         # else:
         #     rgbs = torch.sigmoid(colors[:, 0, :])
         ### TODO: add viewpoint encoding
-        rgbs = self.mlp_color[weather](self._features)
 
         activated_opacities = self.get_opacity
         activated_scales = self.get_scaling
         activated_rotations = self.get_quats
-        actovated_colors = rgbs
+        actovated_colors = self.gbuffer(
+            weather, activated_rotations, activated_scales, self._means, cam)
 
         # collect gaussians information
         gs_dict = dict(
@@ -418,6 +752,7 @@ class FeatureGaussians(nn.Module):
             _quats=activated_rotations[filter_mask],
         )
 
+        self._add_correction_payload(gs_dict, filter_mask)
         # check nan and inf in gs_dict
         for k, v in gs_dict.items():
             if torch.isnan(v).any():
@@ -467,25 +802,46 @@ class FeatureGaussians(nn.Module):
         max_s_square_reg = self.reg_cfg.get("max_s_square_reg", None)
         if max_s_square_reg is not None and not self.ball_gaussians:
             loss_dict["max_s_square"] = torch.mean((self.get_scaling.max(dim=1).values) ** 2) * max_s_square_reg.w
+        if (self.raw_normal_residual_regularization_weight > 0
+                and self._raw_normal_residual_penalty is not None):
+            loss_dict["normal_residual"] = (
+                self.raw_normal_residual_regularization_weight * self._raw_normal_residual_penalty)
         return loss_dict
 
     def load_state_dict(self, state_dict: Dict, **kwargs) -> str:
+        allow_new_weather = bool(kwargs.pop("allow_new_weather", False))
         N = state_dict["_means"].shape[0]
         self._means = Parameter(torch.zeros((N,) + self._means.shape[1:], device=self.device))
         self._scales = Parameter(torch.zeros((N,) + self._scales.shape[1:], device=self.device))
         self._quats = Parameter(torch.zeros((N,) + self._quats.shape[1:], device=self.device))
         self._features = Parameter(torch.zeros((N,) + self._features.shape[1:], device=self.device))
         self._opacities = Parameter(torch.zeros((N,) + self._opacities.shape[1:], device=self.device))
+        if self.rgb_residual_enabled:
+            values = state_dict.get("_correction_features")
+            if not isinstance(values, torch.Tensor) or values.shape != (N, self.correction_feature_dim):
+                raise ValueError("RGB joint checkpoint requires matching correction feature rows")
+            self._initialize_correction_features()
 
-        current_mlp_keys = {key for key in self.state_dict().keys() if key.startswith('mlp_color.')}
+        decoder_prefix = 'mlp_material.' if self.pbr_enabled else 'mlp_color.'
+        current_mlp_keys = {key for key in self.state_dict().keys() if key.startswith(decoder_prefix)}
 
         filtered_state_dict = {}
         for k, v in state_dict.items():
-            if k.startswith("mlp_color"):
+            if k.startswith(decoder_prefix):
                 if k in current_mlp_keys:
                     filtered_state_dict[k] = v
             else:
                 filtered_state_dict[k] = v
+
+        if allow_new_weather:
+            current = self.state_dict()
+            for weather in self.weather_material_decoders:
+                prefix = f"weather_material_decoders.{weather}."
+                expected = {key for key in current if key.startswith(prefix)}
+                present = expected.intersection(filtered_state_dict)
+                if not present:
+                    # Only an entirely new branch may be absent on warm start.
+                    filtered_state_dict.update({key: current[key] for key in expected})
 
         msg = super().load_state_dict(filtered_state_dict, **kwargs)
         return msg

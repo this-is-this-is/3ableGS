@@ -1,0 +1,4 @@
+base_config: base.yaml
+trainer:
+  dynamic_gbuffer:
+    enabled: false

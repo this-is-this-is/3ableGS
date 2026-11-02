@@ -14,6 +14,21 @@ from gsplat.cuda_legacy._wrapper import num_sh_bases
 from gsplat.cuda_legacy._torch_impl import quat_to_rotmat
 from gsplat.cuda._wrapper import spherical_harmonics
 
+def gaussian_normals(quats, scales, means=None, cam_pos=None):
+    """Return each Gaussian's rotated minimum-scale axis.
+
+    The hard axis selection intentionally supplies no scale gradient. Optional
+    camera-facing orientation prevents opposing normals cancelling in a splat.
+    """
+    rotation = quat_to_rotmat(quats)
+    indices = scales.argmin(dim=-1)
+    normals = rotation.gather(2, indices[:, None, None].expand(-1, 3, -1)).squeeze(-1)
+    normals = torch.nn.functional.normalize(normals, dim=-1)
+    if means is not None and cam_pos is not None:
+        towards_cam = cam_pos.reshape(1, 3) - means
+        normals = normals * torch.sign((normals * towards_cam).sum(-1, keepdim=True) + 1e-8)
+    return normals
+
 def interpolate_quats(q1, q2, fraction=0.5):
     q1 = q1 / torch.norm(q1, dim=-1, keepdim=True)
     q2 = q2 / torch.norm(q2, dim=-1, keepdim=True)

@@ -1,0 +1,403 @@
+Historical tool output: code excerpts; contains optional branches not all enabled
+Source: /home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl:135
+Record timestamp (UTC): 2026-10-12T01:21:50.294Z
+
+Script completed
+Wall time 0.1 seconds
+Output:
+
+"""Opt-in RGB boundary objectives and detached pseudo-label confidence.
+
+All targets come from the current training image. LPIPS calls the frozen feature
+network directly, never the stateful evaluation Metric.
+"""
+import math
+import torch
+import torch.nn.functional as F
+
+
+DEFAULTS = dict(enabled=False, start_step=2000, ramp_steps=1000,
+                rgb_w=0.05, gradient_w=0.02, perceptual_w=0.0,
+                perceptual_final_w=0.0, perceptual_decay_start=0,
+                perceptual_decay_steps=0,
+                edge_threshold=0.05, radius=2, patch_size=128, num_patches=4,
+                min_valid_fraction=0.99)
+GBUFFER_DEFAULTS = dict(enabled=False, radius=2, edge_weight=0.25,
+                        normal_angle_degrees=25.0, albedo_threshold=0.15)
+
+
+def validate_boundary_config(config=None, *, gbuffer=False):
+    defaults = GBUFFER_DEFAULTS if gbuffer else DEFAULTS
+    cfg = {**defaults, **dict(config or {})}
+    if set(cfg) - set(defaults):
+        raise ValueError(f"unknown boundary options: {sorted(set(cfg) - set(defaults))}")
+    if not isinstance(cfg['enabled'], bool):
+        raise ValueError('boundary enabled must be boolean')
+    for key, value in cfg.items():
+        if key == 'enabled':
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f'boundary {key} must be finite and nonnegative')
+    for key in ('radius', 'start_step', 'ramp_steps', 'patch_size', 'num_patches',
+                'perceptual_decay_start', 'perceptual_decay_steps'):
+        if key in cfg and not isinstance(cfg[key], int):
+            raise ValueError(f'boundary {key} must be an integer')
+    if gbuffer:
+        if cfg['edge_weight'] > 1 or not 0 < cfg['normal_angle_degrees'] <= 180:
+            raise ValueError('invalid G-buffer boundary weight/angle')
+    elif cfg['patch_size'] < 32 or cfg['num_patches'] < 1 or not 0 < cfg['min_valid_fraction'] <= 1 or cfg['edge_threshold'] <= 0:
+        raise ValueError('invalid boundary patch size/count, edge threshold or valid fraction')
+    return cfg
+
+
+def sobel(image):
+    """Signed x/y derivatives, HWC -> HW(C*2), including all RGB channels."""
+    channels = image.shape[-1]
+    kernels = image.new_tensor([[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]]) / 8
+    kernels = kernels[:, None].repeat(channels, 1, 1, 1)
+    x = F.pad(image.permute(2, 0, 1)[None], (1, 1, 1, 1), mode='replicate')
+    return F.conv2d(x, kernels, groups=channels)[0].permute(1, 2, 0)
+
+
+def dilate(mask, radius):
+    return F.max_pool2d(mask[None, None].float(), 2 * radius + 1, 1, radius)[0, 0]
+
+
+def box_mean(image, height, width):
+    integral = F.pad(image.cumsum(0).cumsum(1), (1, 0, 1, 0))
+    return (integral[height:, width:] - integral[:-height, width:]
+            - integral[height:, :-width] + integral[:-height, :-width]) / (height * width)
+
+
+def boundary_rgb_losses(pred, target, valid, step, config, perceptual_net=None):
+    cfg = validate_boundary_config(config)
+    if not cfg['enabled'] or step < cfg['start_step']:
+        return {}
+    ramp = min(1., (step - cfg['start_step']) / max(cfg['ramp_steps'], 1)) if cfg['ramp_steps'] else 1.
+    target, valid = target.detach(), valid.detach().float()
+    # Exclude an invalid pixel's entire stencil; masking RGB before Sobel would
+    # manufacture a strong edge on the ego-car mask itself.
+    stencil = (dilate(1 - valid, 1) == 0).to(pred)
+    gt_gradient = sobel(target)
+    magnitude = gt_gradient.abs().amax(-1)
+    # Convolution roundoff on a constant image must not manufacture edges.
+    edge = torch.where(magnitude > 1e-6, magnitude / cfg['edge_threshold'], 0.).clamp(0, 1)
+    edge = dilate(edge * stencil, cfg['radius']) * stencil
+    denom = edge.sum().clamp_min(1)
+    losses = {}
+    if cfg['rgb_w']:
+        losses['boundary_rgb_loss'] = ramp * cfg['rgb_w'] * ((pred - target).abs().mean(-1) * edge).sum() / denom
+    if cfg['gradient_w']:
+        losses['boundary_gradient_loss'] = ramp * cfg['gradient_w'] * ((sobel(pred) - gt_gradient).abs().mean(-1) * edge).sum() / denom
+    perceptual_w = cfg['perceptual_w']
+    if cfg['perceptual_decay_steps'] and step >= cfg['perceptual_decay_start']:
+        decay = min(
+            1.0,
+            (step - cfg['perceptual_decay_start']) / cfg['perceptual_decay_steps'],
+        )
+        perceptual_w = (
+            perceptual_w * (1.0 - decay) + cfg['perceptual_final_w'] * decay
+        )
+    if perceptual_w:
+        if perceptual_net is None:
+            raise ValueError('perceptual boundary loss requires a frozen LPIPS network')
+        ph, pw = min(cfg['patch_size'], pred.shape[0]), min(cfg['patch_size'], pred.shape[1])
+        value = pred.sum() * 0
+        if min(ph, pw) >= 32:
+            eligible = box_mean(valid, ph, pw) >= cfg['min_valid_fraction']
+            scores = (box_mean(edge, ph, pw).clamp_min(0) + 0.05) * eligible
+            if scores.sum() > 0:
+                indices = torch.multinomial(scores.flatten(), cfg['num_patches'], replacement=True)
+                crops_p, crops_t = [], []
+                # Global torch RNG participates in the existing exact-resume state.
+                for index in indices.tolist():
+                    y, x = divmod(index, scores.shape[1])
+                    t = target[y:y+ph, x:x+pw]
+                    mask = valid[y:y+ph, x:x+pw, None]
+                    crops_p.append((pred[y:y+ph, x:x+pw] * mask + t * (1-mask)).permute(2, 0, 1))
+                    crops_t.append(t.permute(2, 0, 1))
+                perceptual_net.eval()
+                value = perceptual_net(torch.stack(crops_p).clamp(0, 1), torch.stack(crops_t).clamp(0, 1), normalize=True).mean()
+        losses['boundary_perceptual_loss'] = ramp * perceptual_w * value
+    return losses
+
+
+@torch.no_grad()
+def gbuffer_boundary_confidence(normal, albedo, semantic_masks, config):
+    """Downweight target discontinuities without using learnable predictions.
+
+    Inputs are already aligned to the native/cropped G-buffer loss frame.
+    Sparse LiDAR holes and nonmetric DR depth are deliberately not depth edges.
+    """
+    cfg = validate_boundary_config(config, gbuffer=True)
+    edge = albedo.new_zeros(albedo.shape[:2], dtype=torch.bool)
+    n = F.normalize(normal, dim=-1) if normal is not None else None
+    cosine = math.cos(math.radians(cfg['normal_angle_degrees']))
+    for axis in (0, 1):
+        first, second = [slice(None)] * 2, [slice(None)] * 2
+        first[axis], second[axis] = slice(None, -1), slice(1, None)
+        a, b = tuple(first), tuple(second)
+        discontinuity = (albedo[a] - albedo[b]).abs().amax(-1) > cfg['albedo_threshold']
+        if n is not None:
+            valid_n = (normal[a].norm(dim=-1) > 0.5) & (normal[b].norm(dim=-1) > 0.5)
+            discontinuity |= valid_n & ((n[a] * n[b]).sum(-1) < cosine)
+        for mask in semantic_masks:
+            discontinuity |= (mask[a] - mask[b]).abs() > 0.5
+        edge[a] |= discontinuity
+        edge[b] |= discontinuity
+    return (1 - (1 - cfg['edge_weight']) * dilate(edge, cfg['radius']))[..., None]
+
+class MultiTrainer_pbr(MultiTrainer_weather):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        pixel_source = getattr(self.dataset, "pixel_source", None)
+        self.crop_frac = float(getattr(pixel_source, "gbuffer_crop_frac", 0.0))
+        self._opencv_to_opengl = OPENCV_TO_OPENGL.to(self.device)
+        geometry_cfg = self._geometry_consistency_config()
+        if geometry_cfg:
+            from models.geometry_consistency import validate_geometry_consistency_config
+            validate_geometry_consistency_config(geometry_cfg)
+        from models.boundary_losses import validate_boundary_config
+        from models.gaussians.boundary_renderer import validate_boundary_renderer_config
+        boundary_cfg = validate_boundary_config(self.losses_dict.get('boundary', {}))
+        validate_boundary_config(self.losses_dict.get('gbuffer_boundary', {}), gbuffer=True)
+        renderer_cfg = validate_boundary_renderer_config(self.render_cfg.get('boundary_renderer', {}))
+        if renderer_cfg['enabled'] and self.render_cfg.get('packed', False):
+            raise ValueError('boundary renderer training requires packed=false')
+        if boundary_cfg['enabled'] and boundary_cfg['perceptual_w']:
+            self.lpips.net.requires_grad_(False)
+            self.lpips.net.eval()
+
+    def _init_models(self):
+        # Register before the base class walks model_config: it instantiates
+        # anything it does not recognise with a stale loop variable. The misc
+        # path already passes class_name/params/device, and HDREnvLight
+        # absorbs the extra `n` it also passes.
+        self.misc_classes_keys = list(self.misc_classes_keys) + [
+            "EnvLight", "Fog", "CameraResponse", "LocalIllumination"
+        ]
+        super()._init_models()
+        illumination = self.models.get("LocalIllumination")
+        if illumination is not None:
+            illumination.set_aabb(self.aabb)
+
+    def _geometry_consistency_config(self):
+        return getattr(self, "losses_dict", {}).get("geometry_consistency", {})
+
+    def _prepare_reconstruction_features(self, gs, cam, weather):
+        """Append optional auxiliary attributes before the same alpha blend.
+
+        The first eight material channels retain their legacy contract.  A
+        per-forward layout allows independent E4/E6 and their combination.
+        """
+        self._reconstruction_feature_layout = {}
+        self._tangent_texture_coefficients = None
+            # so the residual is bounded rather than truncated. A hard cutoff
+            # zeroed the gradient exactly where the prediction was worst, which
+            # let a badly oriented normal sit there untouched forever.
+            resid = 1.0 - cos
+            c = normal_cfg.get("robust_c", 0.5)
+            confidence = 1.0 if boundary_confidence is None else boundary_confidence
+            loss_dict["normal_loss"] = normal_cfg.w * (
+                mask * confidence * resid / (1.0 + resid / c)
+            ).sum() / mask.sum().clamp(min=1.0)
+            self._last_normal_cos = (mask * cos).sum().item() / denom.item()
+
+        return loss_dict
+
+    def compute_losses(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        image_infos: Dict[str, torch.Tensor],
+        cam_infos: Dict[str, torch.Tensor],
+        weather: str,
+    ) -> Dict[str, torch.Tensor]:
+        loss_dict = super().compute_losses(outputs, image_infos, cam_infos, weather)
+        boundary_cfg = self.losses_dict.get('boundary', {})
+        if boundary_cfg.get('enabled', False) and weather == 'raw':
+            from models.boundary_losses import boundary_rgb_losses
+            valid = 1.0 - image_infos.get('egocar_masks', torch.zeros_like(image_infos['pixels'][...,0]))
+            loss_dict.update(boundary_rgb_losses(outputs['rgb'], image_infos['pixels'], valid, self.step,
+                                                 boundary_cfg, self.lpips.net))
+        if "gbuf_basecolor" in image_infos:
+            loss_dict.update(self.gbuffer_losses(outputs, image_infos, cam_infos))
+        env_cfg = self.model_config.get("EnvLight", None)
+        if env_cfg is not None:
+            loss_dict.update(self.env.compute_reg_loss(env_cfg.get("reg", None)))
+        response = self.models.get("CameraResponse")
+        if response is not None:
+            loss_dict.update(response.compute_reg_loss(
+                self.model_config.CameraResponse.get("reg", None)
+            ))
+        illumination = self.models.get("LocalIllumination")
+        if illumination is not None and weather == "raw":
+            loss_dict.update(illumination.compute_reg_loss(
+                self.model_config.LocalIllumination.get("reg", None)
+            ))
+        geometry_cfg = self._geometry_consistency_config()
+        if geometry_cfg.get("enabled", False) and weather == "raw":
+            from models.geometry_consistency import geometry_consistency_loss
+            geometry_infos = dict(image_infos)
+        if self.density_control_strategy == "gdags":
+            if self.xys_signed_grad_norm is None:
+                raise RuntimeError("GDAGS signed gradient statistics are missing")
+            split_score, clone_score = gdags_gradient_scores(
+                self.xys_signed_grad_norm, self.xys_grad_norm,
+                self.vis_counts, self.gdags_config,
+            )
+            return (
+                (split_score >= self.gdags_config.split_grad_thresh).reshape(-1),
+                (clone_score >= self.gdags_config.clone_grad_thresh).reshape(-1),
+            )
+        high_grads = (self.xys_grad_norm / self.vis_counts > self.ctrl_cfg.densify_grad_thresh).reshape(-1)
+        return high_grads, high_grads
+
+    def refinement_after(self, step, optimizer: torch.optim.Optimizer) -> None:
+        assert step == self.step
+        if self.step <= self.ctrl_cfg.warmup_steps:
+            return
+        with torch.no_grad():
+            # only split/cull if we've seen every image since opacity reset
+            reset_interval = self.ctrl_cfg.reset_alpha_interval
+            do_densification = (
+                    self.step < self.ctrl_cfg.stop_split_at
+                    and self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval)
+            )
+            # split & duplicate
+            print(f"Class {self.class_prefix} current points: {self.num_points} @ step {self.step}")
+            if do_densification:
+                assert self.xys_grad_norm is not None and self.vis_counts is not None and self.max_2Dsize is not None
+
+                split_high_grads, clone_high_grads = self._densification_gradient_masks()
+                # Split mutates parent scales. GDAGS classifies cloning using
+                # their original sizes, as in the authors' clone-before-split
+                # decision. Keep the legacy order exactly for default control.
+                gdags_clone_sizes = None
+                if self.density_control_strategy == "gdags":
+                    gdags_clone_sizes = (
+                        self.get_scaling.max(dim=-1).values
+                        <= self.ctrl_cfg.densify_size_thresh * self.scene_scale
+                    ).reshape(-1)
+
+                splits = (
+                        self.get_scaling.max(dim=-1).values > \
+                        self.ctrl_cfg.densify_size_thresh * self.scene_scale
+                ).reshape(-1)
+                if self.step < self.ctrl_cfg.stop_screen_size_at:
+                    # Retain WeatherCity's screen-size policy: a world-small
+                    # point may qualify for both screen-driven splitting and
+                    # cloning. GDAGS changes gradient scores, not that overlap.
+                    splits |= (self.max_2Dsize > self.ctrl_cfg.split_screen_size).reshape(-1)
+                splits &= split_high_grads
+                nsamps = self.ctrl_cfg.n_split_samples
+                (
+                    split_means,
+                    split_feature,
+                    split_opacities,
+                    split_scales,
+                    split_quats,
+                ) = self.split_gaussians(splits, nsamps)
+
+                dups = (
+                        self.get_scaling.max(dim=-1).values <= \
+                        self.ctrl_cfg.densify_size_thresh * self.scene_scale
+                ).reshape(-1)
+                if gdags_clone_sizes is not None:
+                    dups = gdags_clone_sizes
+                dups &= clone_high_grads
+                (
+                    dup_means,
+                    dup_feature,
+                    dup_opacities,
+                    dup_scales,
+                    dup_quats,
+                ) = self.dup_gaussians(dups)
+
+                self._means = Parameter(torch.cat([self._means.detach(), split_means, dup_means], dim=0))
+                # self.colors_all = Parameter(torch.cat([self.colors_all.detach(), split_colors, dup_colors], dim=0))
+
+                self._features = Parameter(
+                    torch.cat([self._features.detach(), split_feature, dup_feature], dim=0))
+                self._opacities = Parameter(
+                    torch.cat([self._opacities.detach(), split_opacities, dup_opacities], dim=0))
+                self._scales = Parameter(torch.cat([self._scales.detach(), split_scales, dup_scales], dim=0))
+                self._quats = Parameter(torch.cat([self._quats.detach(), split_quats, dup_quats], dim=0))
+
+                # append zeros to the max_2Dsize tensor
+                self.max_2Dsize = torch.cat(
+                    [self.max_2Dsize, torch.zeros_like(split_scales[:, 0]), torch.zeros_like(dup_scales[:, 0])],
+                    dim=0,
+                )
+
+                split_idcs = torch.where(splits)[0]
+                param_groups = self.get_gaussian_param_groups()
+                dup_in_optim(optimizer, split_idcs, param_groups, n=nsamps)
+
+                dup_idcs = torch.where(dups)[0]
+                param_groups = self.get_gaussian_param_groups()
+                dup_in_optim(optimizer, dup_idcs, param_groups, 1)
+                if self.density_control_strategy == "gdags":
+                    # Topology changed; old per-point observations cannot be
+                    # used for the new population. Screen radii remain until
+                    # culling has consumed them below.
+                    self.xys_grad_norm = None
+                    self.xys_signed_grad_norm = None
+                    self.vis_counts = None
+
+            # cull NOTE: Offset all the opacity reset logic by refine_every so that we don't
+            # save checkpoints right when the opacity is reset (saves every 2k)
+            if (
+                self.step % reset_interval
+                > max(self.num_train_images, self.ctrl_cfg.refine_interval)
+                and self.culling_is_active()
+            ):
+                deleted_mask = self.cull_gaussians()
+                param_groups = self.get_gaussian_param_groups()
+                remove_from_optim(optimizer, deleted_mask, param_groups)
+            print(f"Class {self.class_prefix} left points: {self.num_points}")
+
+            # reset opacity
+            if (
+                self.step % reset_interval == self.ctrl_cfg.refine_interval
+                and self.opacity_reset_is_active()
+            ):
+                # NOTE: in nerfstudio, reset_value = cull_alpha_thresh * 0.8
+                # we align to original repo of gaussians spalting
+                reset_value = torch.min(self.get_opacity.data,
+                                        torch.ones_like(self._opacities.data) * self.ctrl_cfg.reset_alpha_value)
+                self._opacities.data = torch.logit(reset_value)
+                # reset the exp of optimizer
+                for group in optimizer.param_groups:
+                    if group["name"] == self.class_prefix + "opacity":
+                        old_params = group["params"][0]
+                        param_state = optimizer.state[old_params]
+                        param_state["exp_avg"] = torch.zeros_like(param_state["exp_avg"])
+                        param_state["exp_avg_sq"] = torch.zeros_like(param_state["exp_avg_sq"])
+            self.xys_grad_norm = None
+            if self.density_control_strategy == "gdags":
+                self.xys_signed_grad_norm = None
+            self.vis_counts = None
+            self.max_2Dsize = None
+
+    def opacity_reset_is_active(self) -> bool:
+        """Whether scheduled opacity resets are still enabled at this step."""
+        stop_reset_at = self.ctrl_cfg.get("stop_reset_at", None)
+        return stop_reset_at is None or self.step < stop_reset_at
+
+    def culling_is_active(self) -> bool:
+        """Whether opacity/size pruning is still enabled at this step."""
+        stop_cull_at = self.ctrl_cfg.get("stop_cull_at", None)
+        return stop_cull_at is None or self.step < stop_cull_at
+
+    def cull_gaussians(self):
+        """
+        This function deletes gaussians with under a certain opacity threshold
+        """
+        n_bef = self.num_points
+        # cull transparent ones
+        culls = (self.get_opacity.data < self.ctrl_cfg.cull_alpha_thresh).reshape(-1)
+        if self.step > self.ctrl_cfg.reset_alpha_interval:
+            # cull huge ones
+            toobigs = (
+

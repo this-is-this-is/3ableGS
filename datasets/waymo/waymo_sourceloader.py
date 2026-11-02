@@ -157,6 +157,8 @@ class WaymoPixelSource(ScenePixelSource):
     def load_cameras(self):
         self._timesteps = torch.arange(self.start_timestep, self.end_timestep)
         self.register_normalized_timestamps()
+        if self.data_cfg.get("load_gbuffer", False) and list(self.camera_list) != [0]:
+            raise ValueError("The restored G-buffer sequence maps to camera 0 only")
 
         for idx, cam_id in enumerate(self.camera_list):
             logger.info(f"Loading camera {cam_id}")
@@ -172,6 +174,11 @@ class WaymoPixelSource(ScenePixelSource):
                 undistort=self.data_cfg.undistort,
                 buffer_downscale=self.buffer_downscale,
                 load_weather=self.data_cfg.load_weather,
+                load_gbuffer=self.data_cfg.get("load_gbuffer", False),
+                gbuffer_path=self.data_cfg.get("gbuffer_path", None),
+                gbuffer_seq_id=self.data_cfg.get("gbuffer_seq_id", 0),
+                gbuffer_crop_top=self.data_cfg.get("gbuffer_crop_top", 0),
+                gbuffer_size=self.data_cfg.get("gbuffer_size", None),
                 device=self.device,
             )
             camera.load_time(self.normalized_time)
@@ -182,6 +189,8 @@ class WaymoPixelSource(ScenePixelSource):
             )
             logger.info(f"Camera {camera.cam_name} loaded.")
             self.camera_data[cam_id] = camera
+        if self.data_cfg.get("load_gbuffer", False):
+            self.gbuffer_crop_frac = self.camera_data[0].gbuffer_crop_frac
     
     def load_objects(self):
         """

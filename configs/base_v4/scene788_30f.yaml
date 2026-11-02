@@ -1,0 +1,4 @@
+# Same frames, targets, seed and 30k schedule as the measured Base v3 run.
+base_config:
+  - ../base_v3/scene788_30f.yaml
+  - combo_perceptual_02.yaml

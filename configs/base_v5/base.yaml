@@ -1,0 +1,4 @@
+# Base v5 is Base v4 plus the jointly trained display-RGB residual branch.
+base_config:
+  - ../base_v4/base.yaml
+  - rgb_residual.yaml

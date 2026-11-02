@@ -152,6 +152,10 @@ class DepthLoss(nn.Module):
         hit_mask: Tensor = None,
     ):
         depth_error = self._compute_depth_loss(pred_depth, gt_depth, self.upper_bound, hit_mask)
+        if depth_error.numel() == 0 and self.reduction != "none":
+            # An early low-opacity render or crop may contain no valid LiDAR
+            # hits. Preserve a zero gradient instead of mean(empty) -> NaN.
+            return depth_error.sum()
         if self.depth_error_percentile is not None:
             # to avoid outliers. not used for now
             depth_error = depth_error.flatten()

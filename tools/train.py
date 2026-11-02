@@ -12,10 +12,12 @@ from omegaconf import OmegaConf
 
 from datasets.driving_dataset import DrivingDataset
 from models.video_utils import render_images, save_videos
+from models.temporal_training import TemporalMaterialTraining
 from tools.eval import do_evaluation
 from utils.backup import backup_project
 from utils.logging import MetricLogger, setup_logging
 from utils.misc import import_str
+from utils.config import load_training_config
 
 logger = logging.getLogger()
 current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -33,26 +35,7 @@ def set_seeds(seed=31):
 
 def setup(args):
     # get config
-    cfg = OmegaConf.load(args.config_file)
-
-    # parse datasets
-    args_from_cli = OmegaConf.from_cli(args.opts)
-    if "dataset" in args_from_cli:
-        cfg.dataset = args_from_cli.pop("dataset")
-
-    assert "dataset" in cfg or "data" in cfg, \
-        "Please specify dataset in config or data in config"
-
-    if "dataset" in cfg:
-        dataset_type = cfg.pop("dataset")
-        dataset_cfg = OmegaConf.load(
-            os.path.join("configs", "datasets", f"{dataset_type}.yaml")
-        )
-        # merge data
-        cfg = OmegaConf.merge(cfg, dataset_cfg)
-
-    # merge cli
-    cfg = OmegaConf.merge(cfg, args_from_cli)
+    cfg = load_training_config(args.config_file, args.opts)
     log_dir = os.path.join(args.output_root, args.project, args.run_name)
 
     # update config and create log dir
@@ -177,6 +160,9 @@ def main(args):
 
     # setup optimizer
     trainer.initialize_optimizer()
+    temporal_training = TemporalMaterialTraining(
+        dataset, cfg.trainer.losses.get("temporal_material"),
+    )
 
     # setup metric logger
     metrics_file = os.path.join(cfg.log_dir, "metrics.json")
@@ -196,7 +182,7 @@ def main(args):
     for step in metric_logger.log_every(all_iters, cfg.logging.print_freq):
         # ----------------------------------------------------------------------------
         # ----------------------------     Validate     ------------------------------
-        if step % cfg.logging.vis_freq == 0 and cfg.logging.vis_freq > 0:
+        if cfg.logging.vis_freq > 0 and step % cfg.logging.vis_freq == 0:
             logger.info("Visualizing...")
             vis_timestep = np.linspace(
                 0,
@@ -254,6 +240,12 @@ def main(args):
         trainer.preprocess_per_train_step(step=step)
         trainer.optimizer_zero_grad()  # zero grad
 
+        # Experiment 4 freezes train-only teacher confidence once, using this
+        # fresh model's warmup geometry. It restores render state and RNG and
+        # never runs from an evaluator or from the main differentiable pass.
+        if hasattr(trainer, "prepare_teacher_confidence"):
+            trainer.prepare_teacher_confidence(step)
+
         # get data
         train_step_camera_downscale = trainer._get_downscale_factor()
 
@@ -268,6 +260,12 @@ def main(args):
                 if isinstance(v, torch.Tensor):
                     cam_infos[k] = v.cuda(non_blocking=True)
 
+            # Render the detached train-only neighbor first. The main forward
+            # below then owns self.info/means2d and all densification state.
+            temporal_previous = temporal_training.prepare_previous(
+                trainer, image_infos, train_step_camera_downscale, w, step,
+            )
+
             # forward & backward
             outputs = trainer(image_infos, cam_infos, w)
             trainer.update_visibility_filter()
@@ -278,16 +276,20 @@ def main(args):
                 cam_infos=cam_infos,
                 weather=w
             )
+            loss.update(temporal_training.compute(
+                trainer, outputs, image_infos, temporal_previous, w, step,
+            ))
 
-            raw_image_infos, raw_cam_infos = image_infos_dict["raw"], cam_infos_dict["raw"]
-            content_loss = trainer.compute_content_loss(
-                outputs=outputs,
-                image_infos=image_infos,
-                cam_infos=cam_infos,
-                content_image_infos=raw_image_infos,
-                content_cam_infos=raw_cam_infos,
-            )
-            loss.update(content_loss)
+            if trainer.vgg_config is not None:
+                raw_image_infos, raw_cam_infos = image_infos_dict["raw"], cam_infos_dict["raw"]
+                content_loss = trainer.compute_content_loss(
+                    outputs=outputs,
+                    image_infos=image_infos,
+                    cam_infos=cam_infos,
+                    content_image_infos=raw_image_infos,
+                    content_cam_infos=raw_cam_infos,
+                )
+                loss.update(content_loss)
 
             # check nan or inf
             for k, v in loss.items():
@@ -319,6 +321,45 @@ def main(args):
 
                 metric_logger.update(**{f"train_metrics/{w}/" + k: v.item() for k, v in metric_dict.items()})
                 metric_logger.update(**{f"losses/{w}/" + k: v.item() for k, v in loss_dict[w].items()})
+                if w == "raw" and temporal_training.last_stats:
+                    metric_logger.update(**{
+                        f"temporal_stats/{w}/{key}": value
+                        for key, value in temporal_training.last_stats.items()
+                    })
+                rdg_cfg = getattr(trainer, "rdg_fusion_config", None)
+                if w == "raw" and rdg_cfg and rdg_cfg["enabled"]:
+                    rdg_output = outputs_dict[w]
+                    active = "rdg_valid" in rdg_output
+                    metric_logger.update(**{"rdg_stats/raw/active_update": float(active)})
+                    if active:
+                        # Sample every fusion update: print_freq need not be
+                        # a multiple of the fusion interval. These windows
+                        # describe active updates, not zero-filled idle steps.
+                        metric_logger.update(**{
+                            "rdg_stats/raw/strength": trainer.rdg_strength(),
+                            "rdg_stats/raw/context_count": len(rdg_output["rdg_context_ids"]),
+                            "rdg_stats/raw/history_coverage": rdg_output["rdg_valid"].float().mean(),
+                            "rdg_stats/raw/history_weight": rdg_output["rdg_history_weight"].mean(),
+                        })
+                if step % cfg.logging.print_freq == 0:
+                    if w == "raw":
+                        metric_logger.update(**{
+                            f"confidence_stats/{w}/{key}": value
+                            for key, value in getattr(trainer, "_last_teacher_confidence_stats", {}).items()
+                        })
+                        metric_logger.update(**{
+                            f"calibration_stats/{w}/{key}": value
+                            for key, value in getattr(trainer, "_last_teacher_calibration_stats", {}).items()
+                        })
+                    if w == "raw" and temporal_training.config["num_samples"]:
+                        metric_logger.update(**{
+                            f"temporal_stats/{w}/{key}": value
+                            for key, value in temporal_training.counters.items()
+                        })
+                    metric_logger.update(**{
+                        f"diffreg_stats/{w}/{key}": value
+                        for key, value in getattr(trainer, "_last_diffreg_stats", {}).items()
+                    })
 
             metric_logger.update(
                 **{"train_stats/lr_" + group['name']: group['lr'] for group in trainer.optimizer.param_groups})
@@ -400,7 +441,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_root", default="./work_dirs/", help="path to save checkpoints and logs", type=str)
 
     # weather
-    parser.add_argument("--train_weathers", help="weather type", nargs='*', type=str)
+    parser.add_argument("--train_weathers", help="additional weather types; default: raw only", nargs='*', type=str, default=[])
 
     # eval
     parser.add_argument("--resume_from", default=None, help="path to checkpoint to resume from", type=str)

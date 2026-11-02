@@ -1,0 +1,175 @@
+Historical tool output: weather overlay and raw overlay
+Source: /home/user/.codex/sessions/2026/10/14/rollout-2026-10-14T12-55-23-01a11103-396a-7a23-97df-aeaa138bf2b0_01a1388c-f032-70b3-abbb-0d81d18b2541.jsonl:55
+Record timestamp (UTC): 2026-10-14T03:55:50.243Z
+
+Script completed
+Wall time 0.1 seconds
+Output:
+
+# Snow material/environment residual training overlay.
+#
+# This deliberately inherits the config saved beside --init_from_base instead
+# of copying a particular 8-D/32-D scene topology.  Example material stage:
+#
+#   python tools/train.py \
+#     --config_file configs/weathercity_pbr_snow.yaml \
+#     --init_from_base output/pbr/<base>/checkpoint_final.pth \
+#     --project pbr --run_name <snow-material-run>
+#
+# Follow-up stages can initialize from the preceding weather checkpoint while
+# resetting their own optimizer and step:
+#
+#   ... --init_from_base output/pbr/<snow-material-run>/checkpoint_final.pth \
+#       --weather_stage environment trainer.optim.num_iters=3000
+#   ... --init_from_base output/pbr/<snow-env-run>/checkpoint_final.pth \
+#       --weather_stage joint trainer.optim.num_iters=5000
+base_config_from_checkpoint: true
+
+trainer:
+  type: models.trainers.scene_graph_pbr.MultiTrainer_pbr_snow
+  optim:
+    num_iters: 5000
+    use_grad_scaler: false
+    cache_buffer_freq: -1
+  weather_training:
+    enabled: true
+    weather: snow
+    # material | environment | joint; can also be set with --weather_stage.
+    stage: material
+    material_classes: [Background]
+    weather_strength: 1.0
+    material_lr: 1.0e-4
+    environment_lr: 1.0e-3
+    weight_decay: 0.0
+    logit_eps: 1.0e-4
+    charbonnier_eps: 1.0e-3
+    # gt_relative preserves the raw->weather edit. reconstruction compensates
+    # for frozen raw-material error so paired and absolute losses share a target.
+    paired_target_mode: gt_relative
+    target_albedo_delta_cap: 4.0
+    target_roughness_delta_cap: 5.0
+    # If any decoder architecture value is CLI-overridden, repeat that same
+    # override when starting a later stage from the resulting checkpoint.
+    material_decoder:
+      hidden_dim: 32
+      # 1 gives 38->hidden->4. Set 2 with hidden_dim=64 for 38->64->64->4
+      # (the canonical weather-material baseline is called start v1).
+      num_hidden_layers: 1
+      albedo_delta_cap: 4.0
+      roughness_delta_cap: 5.0
+      world_up: [0.0, 0.0, 1.0]
+      detach_inputs: true
+    mask:
+      # V1 learns deposited snow on the static background. Diffusion-edited
+      # people/cars, sky, low-opacity edges and inconsistent inverse-renderer
+      # normals are outside this material-only model.
+      exclude_dynamic: true
+      min_opacity: 0.5
+      normal_cos_min: 0.5
+      base_albedo_error_max: 0.25
+      base_roughness_error_max: 0.35
+      erode_px: 1
+      # Fail loudly when confidence filtering leaves too little supervision.
+      # Check weather_material_valid_fraction during the first smoke run.
+      min_valid_pixels: 64
+    losses:
+      paired_albedo:
+        w: 1.0
+      paired_roughness:
+        w: 0.5
+      # Weak absolute anchors prevent a pure pair-difference fit from drifting
+      # when the frozen base prediction is already close to its raw target.
+      absolute_albedo:
+        w: 0.1
+      absolute_roughness:
+        w: 0.05
+      delta_albedo_reg:
+        w: 1.0e-3
+      delta_roughness_reg:
+        w: 1.0e-3
+      # Used by environment/joint stages. Surface reconstruction is primary;
+      # sky gets a small weight because flakes/cloud hallucinations cannot be
+      # represented by one distant environment map.
+      rgb_surface:
+        w: 0.8
+      rgb_sky:
+        w: 0.1
+      ssim:
+        w: 0.02
+
+model:
+  EnvLight:
+    params:
+      weather_residuals: [snow]
+    reg:
+      weather_residual:
+        magnitude:
+          w: 1.0e-3
+        tv:
+          w: 1.0e-3
+
+data:
+  # RGB is float32 in the current preload path. Keeping paired raw+snow RGB
+  # and G-buffers on CPU avoids consuming several extra GB of training VRAM.
+  preload_device: cpu
+  pixel_source:
+    cameras: [0]
+    load_weather: [snow]
+    load_gbuffer: true
+
+render:
+  render_full: false
+  render_test: true
+  render_novel: null
+
+logging:
+  vis_freq: 1000
+  print_freq: 250
+  saveckpt_freq: 1000
+  save_seperate_video: true
+base_config: ../base_v3/scene788.yaml
+trainer:
+  losses:
+    rgb:
+      w: 0.7
+    ssim:
+      w: 0.3
+    boundary:
+      enabled: true
+      start_step: 5000
+      ramp_steps: 1000
+      rgb_w: 0.0
+      gradient_w: 0.0
+      perceptual_w: 0.02
+      edge_threshold: 0.05
+      radius: 2
+      patch_size: 128
+      num_patches: 4
+      min_valid_fraction: 0.99
+model:
+  Background:
+    ctrl:
+      stop_split_at: 25000
+      stop_reset_at: 20000
+# WeatherCity Base v3, scene 788.
+# This resolves to the architecture evaluated as E3 camera response.
+base_config: ../reconstruction_followups/scene788_baseline.yaml
+
+model:
+  CameraResponse:
+    type: models.camera_response.MonotonicCameraResponse
+    params:
+      num_knots: 9
+      min_slope: 0.05
+    optim:
+      all:
+        lr: 0.001
+    reg:
+      identity:
+        w: 0.001
+      smoothness:
+        w: 0.001
+11G	output/pbr/base_v3_boundaries/scene_788_100f/combo_perceptual_02
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p2  879G  784G   51G  94% /home/user/Desktop
+

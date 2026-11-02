@@ -1,0 +1,21 @@
+# Matched Base v4 control; no cache construction or confidence reweighting.
+trainer:
+  teacher_confidence:
+    enabled: false
+    build_step: 3000
+    ramp_steps: 1000
+    downscale: 4
+    max_gap: 2
+    max_history: 4
+    confidence_floor: 0.25
+    albedo_sigma: 0.1
+    roughness_sigma: 0.1
+    metallic_sigma: 0.1
+    min_opacity: 0.95
+    depth_abs: 0.05
+    depth_rel: 0.02
+    normal_cos: 0.9
+    cycle_px: 1.0
+    erode_radius: 1
+    depth_edge_rel: 0.1
+    max_cache_mb: 256

@@ -1,0 +1,67 @@
+Historical tool output: evaluation CLI, LongCLIP commit and checkpoint SHA256
+Source: /home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl:1900
+Record timestamp (UTC): 2026-10-15T06:41:26.109Z
+
+Script completed
+Wall time 4.7 seconds
+Output:
+
+projects onto a text *delta*, f(T_target) - f(T_source). Values from the two are
+not interchangeable; ``--directional_mode delta`` computes the standard variant
+against a neutral source prompt for when a comparison against other papers is
+wanted.
+
+Fog reports CLIP-DS only, per the paper: fog removes so much of the scene that
+content-preservation metrics stop meaning anything. CLIP-S and Sem-CS are still
+computed and stored, just marked in the printed table; --fog_full prints them.
+
+Example::
+
+    conda run -n qwen-edit python -m tools.eval_weather_metrics         --scenes 023 114 327 621 703 172 552 788         --weathers rain snow fog --frames 30         --out output/weather_metrics.json
+
+options:
+  -h, --help            show this help message and exit
+  --data_root DATA_ROOT
+  --scenes SCENES [SCENES ...]
+  --weathers {rain,snow,fog} [{rain,snow,fog} ...]
+  --cam CAM
+  --frames FRAMES       First N frames per scene.
+  --raw_dirname RAW_DIRNAME
+  --edit_dir EDIT_DIR   Predicted-image directory for a single scene/weather
+                        evaluation. Files must be named NNN.png; otherwise
+                        edited images are read from the dataset.
+  --frame_indices FRAME_INDICES [FRAME_INDICES ...]
+                        Only evaluate these zero-based frame indices (for
+                        example the held-out split).
+  --clip_model CLIP_MODEL
+  --clip_backend {transformers,longclip}
+                        CLIP implementation. LongCLIP uses its paired
+                        image/text encoders and 248 tokens.
+  --longclip_repo LONGCLIP_REPO
+                        Official LongCLIP repository used by --clip_backend
+                        longclip.
+  --seg_model SEG_MODEL
+  --skip_sem_cs         CLIP metrics only (no segmentation model).
+  --prompt_mode {full,short}
+  --directional_mode {paper,delta}
+                        'paper': project onto f(T). 'delta': onto
+                        f(T)-f(neutral), the usual definition.
+  --seg_height SEG_HEIGHT
+                        Segmentation input/output height (WeatherCity paper:
+                        384).
+  --seg_width SEG_WIDTH
+                        Segmentation input/output width (WeatherCity paper:
+                        384).
+  --batch_size BATCH_SIZE
+  --device DEVICE
+  --fog_full            Also print CLIP-S / Sem-CS for fog (always in the
+                        JSON).
+  --out OUT
+
+3966af9ae9331666309a22128468b734db4672a7
+9d2c12ffcbf9099f95bfb9cf8f08f949b695e22fb0018e8895e088f4a88b6afd  checkpoints/longclip/longclip-L.pt
+
+?? .conda/
+?? checkpoints/longclip/
+?? tools/eval_weather_metrics.py
+

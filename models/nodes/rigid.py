@@ -441,12 +441,12 @@ class RigidNodes(VanillaGaussians):
         }
         return gaussian_dict
 
-        def compute_reg_loss(
-                self,
-                outputs: Dict[str, torch.Tensor],
-                image_infos: Dict[str, torch.Tensor],
-                cam_infos: Dict[str, torch.Tensor]
-        ) -> Dict[str, torch.Tensor]:
+    def compute_reg_loss(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        image_infos: Dict[str, torch.Tensor],
+        cam_infos: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
         loss_dict = super().compute_reg_loss(outputs, image_infos, cam_infos)
         scaling_reg = self.reg_cfg.get("scaling_reg", None)
         if scaling_reg is not None:

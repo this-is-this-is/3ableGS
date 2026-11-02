@@ -1,0 +1,97 @@
+Historical tool output: evaluator formula documentation; predates LongCLIP backend change
+Source: /home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl:1531
+Record timestamp (UTC): 2026-10-15T06:25:05.574Z
+
+usage: eval_weather_metrics.py [-h] [--data_root DATA_ROOT] --scenes SCENES
+                               [SCENES ...]
+                               [--weathers {rain,snow,fog} [{rain,snow,fog} ...]]
+                               [--cam CAM] [--frames FRAMES]
+                               [--raw_dirname RAW_DIRNAME]
+                               [--edit_dir EDIT_DIR]
+                               [--frame_indices FRAME_INDICES [FRAME_INDICES ...]]
+                               [--clip_model CLIP_MODEL]
+                               [--seg_model SEG_MODEL] [--skip_sem_cs]
+                               [--prompt_mode {full,short}]
+                               [--directional_mode {paper,delta}]
+                               [--seg_height SEG_HEIGHT]
+                               [--seg_width SEG_WIDTH]
+                               [--batch_size BATCH_SIZE] [--device DEVICE]
+                               [--fog_full] [--out OUT]
+
+CLIP-S / CLIP-DS / Sem-CS for the weather-edited frames.
+
+The three numbers the WeatherCity paper reports in Tables 1, 5 and 6, computed
+directly from the image folders this repo produces:
+
+    CLIP-S  = cos( f_img(I), f_img(I_hat) )
+    CLIP-DS = cos( f_img(I_hat) - f_img(I), f_txt(T) )
+    Sem-CS  = frequency-weighted IoU between seg(I_hat) and seg(I)
+
+where I is ``images/raw/<frame>``, I_hat is ``images/<weather>/<frame>`` and T is
+the weather prompt. The released code ships no metric implementation -- the README
+points at WeatherEdit, whose public tree does not carry one either -- so this is
+written from the formulas in the paper body.
+
+Three things the paper leaves open. All are flags here, and whatever was used is
+written into the output JSON so a number can be traced back to its setting:
+
+``--clip_model``
+    The paper names no checkpoint. CLIP-S and CLIP-DS both shift by a few points
+    between ViT-B/32 and ViT-L/14, so a bare number is not comparable without it.
+
+``--seg_model``
+    The paper says "ConvNeXt-XL" and nothing else. UperNet+ConvNeXt-XL on ADE20K
+    is the default; a Cityscapes-trained head gives a different (usually higher)
+    Sem-CS because street scenes fall into fewer, larger classes.
+
+``--prompt_mode``
+    ``full`` uses the exact generation prompt from generate_weather_images.py.
+    Those run 90-140 CLIP tokens and the text encoder truncates at 77, so part of
+    the prompt silently does not reach the embedding -- the script says how much.
+    ``short`` uses a one-line weather phrase that fits. Neither is "the" paper
+    setting; ``full`` at least matches the text the images were generated from.
+
+Also note CLIP-DS here follows the paper, which projects the image delta onto a
+single text embedding f(T). The usual formulation (StyleGAN-NADA, InstructPix2Pix)
+projects onto a text *delta*, f(T_target) - f(T_source). Values from the two are
+not interchangeable; ``--directional_mode delta`` computes the standard variant
+against a neutral source prompt for when a comparison against other papers is
+wanted.
+
+Fog reports CLIP-DS only, per the paper: fog removes so much of the scene that
+content-preservation metrics stop meaning anything. CLIP-S and Sem-CS are still
+computed and stored, just marked in the printed table; --fog_full prints them.
+
+Example::
+
+    conda run -n qwen-edit python -m tools.eval_weather_metrics         --scenes 023 114 327 621 703 172 552 788         --weathers rain snow fog --frames 30         --out output/weather_metrics.json
+
+options:
+  -h, --help            show this help message and exit
+  --data_root DATA_ROOT
+  --scenes SCENES [SCENES ...]
+  --weathers {rain,snow,fog} [{rain,snow,fog} ...]
+  --cam CAM
+  --frames FRAMES       First N frames per scene.
+  --raw_dirname RAW_DIRNAME
+  --edit_dir EDIT_DIR   Predicted-image directory for a single scene/weather
+                        evaluation. Files must be named NNN.png; otherwise
+                        edited images are read from the dataset.
+  --frame_indices FRAME_INDICES [FRAME_INDICES ...]
+                        Only evaluate these zero-based frame indices (for
+                        example the held-out split).
+  --clip_model CLIP_MODEL
+  --seg_model SEG_MODEL
+  --skip_sem_cs         CLIP metrics only (no segmentation model).
+  --prompt_mode {full,short}
+  --directional_mode {paper,delta}
+                        'paper': project onto f(T). 'delta': onto
+                        f(T)-f(neutral), the usual definition.
+  --seg_height SEG_HEIGHT
+  --seg_width SEG_WIDTH
+  --batch_size BATCH_SIZE
+  --device DEVICE
+  --fog_full            Also print CLIP-S / Sem-CS for fog (always in the
+                        JSON).
+  --out OUT
+

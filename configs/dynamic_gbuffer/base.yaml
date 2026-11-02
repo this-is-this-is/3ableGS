@@ -1,0 +1,16 @@
+# D1 changes only training supervision; Base v5 rendering stays unchanged.
+base_config: ../base_v5/scene788_100f.yaml
+trainer:
+  dynamic_gbuffer:
+    enabled: false
+    mode: balanced
+    w: 0.25
+    start_step: 5000
+    ramp_steps: 1000
+    interval: 1
+    chunk_size: 8
+    visibility_downscale: 2
+    min_opacity: 0.1
+    min_pixels: 16
+    purity_floor: 0.1
+    purity_power: 1.0

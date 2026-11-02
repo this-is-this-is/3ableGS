@@ -1,0 +1,4 @@
+# Scene 788 Base v5, camera 0, frames 000..099 (88 train / 12 test).
+base_config:
+  - ../base_v4/scene788_100f.yaml
+  - rgb_residual.yaml

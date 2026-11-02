@@ -1,0 +1,22 @@
+# Phase A data preparation preset. This is not a Base v3/v4 training config:
+# PBR model, G-buffer targets and their losses are restored in later phases.
+base_config: ../datasets/waymo/1cams.yaml
+seed: 0
+data:
+  data_root: data/waymo/processed/training
+  scene_idx: 94
+  start_timestep: 0
+  end_timestep: 99
+  # CPU for data preparation; the eventual raw training preset sets its device.
+  preload_device: cpu
+  pixel_source:
+    cameras: [0]
+    load_weather: []
+    downscale_when_loading: [1]
+    downscale: 1
+    undistort: true
+    test_image_stride: 8
+    load_sky_mask: true
+    load_dynamic_mask: true
+    load_objects: true
+    load_smpl: true

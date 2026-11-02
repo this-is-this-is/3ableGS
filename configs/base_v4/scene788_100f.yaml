@@ -1,0 +1,11 @@
+# Scene 788 Base v4, camera 0, frames 000..099 (88 train / 12 test).
+base_config:
+  - ../base_v3/base.yaml
+  - combo_perceptual_02.yaml
+
+data:
+  scene_idx: 788
+  start_timestep: 0
+  end_timestep: 99
+  pixel_source:
+    gbuffer_path: data/waymo/render_png_788_single_static_100f/gbuffer_frames

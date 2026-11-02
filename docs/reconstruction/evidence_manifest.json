@@ -1,0 +1,146 @@
+[
+  {
+    "id": "E01_definition",
+    "evidence_kind": "User definition",
+    "source_file": "/home/user/.codex/sessions/2026/10/08/rollout-2026-10-08T15-55-46-01a11421-4704-7271-b4f5-a5191a88939b_01a11a4b-ee42-7232-8a21-664ba3647c82.jsonl",
+    "source_line": 349,
+    "timestamp_utc": "2026-10-13T05:02:52.237Z",
+    "excerpt": "evidence/E01_definition.txt"
+  },
+  {
+    "id": "E02_reaffirmation",
+    "evidence_kind": "User reaffirmation",
+    "source_file": "/home/user/.codex/sessions/2026/10/14/rollout-2026-10-14T12-55-23-01a11103-396a-7a23-97df-aeaa138bf2b0_01a1388c-f032-70b3-abbb-0d81d18b2541.jsonl",
+    "source_line": 11,
+    "timestamp_utc": "2026-10-14T03:55:24.085Z",
+    "excerpt": "evidence/E02_reaffirmation.txt"
+  },
+  {
+    "id": "E03_combo_overlay",
+    "evidence_kind": "Historical tool output: config excerpts",
+    "source_file": "/home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl",
+    "source_line": 120,
+    "timestamp_utc": "2026-10-12T01:21:43.502Z",
+    "excerpt": "evidence/E03_combo_overlay.txt"
+  },
+  {
+    "id": "E04_loss_implementation",
+    "evidence_kind": "Historical tool output: code excerpts; contains optional branches not all enabled",
+    "source_file": "/home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl",
+    "source_line": 135,
+    "timestamp_utc": "2026-10-12T01:21:50.294Z",
+    "excerpt": "evidence/E04_loss_implementation.txt"
+  },
+  {
+    "id": "E05_resolved_and_runner",
+    "evidence_kind": "Historical tool output: resolved config excerpt and runner",
+    "source_file": "/home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl",
+    "source_line": 143,
+    "timestamp_utc": "2026-10-12T01:22:01.071Z",
+    "excerpt": "evidence/E05_resolved_and_runner.txt"
+  },
+  {
+    "id": "E06_raw_metrics",
+    "evidence_kind": "Historical tool output: saved-results aggregation",
+    "source_file": "/home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl",
+    "source_line": 187,
+    "timestamp_utc": "2026-10-12T01:25:16.209Z",
+    "excerpt": "evidence/E06_raw_metrics.txt"
+  },
+  {
+    "id": "E07_comparator_metrics",
+    "evidence_kind": "Historical tool output: saved-results aggregation; comparison protocol must be revalidated",
+    "source_file": "/home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl",
+    "source_line": 81,
+    "timestamp_utc": "2026-10-12T01:13:20.627Z",
+    "excerpt": "evidence/E07_comparator_metrics.txt"
+  },
+  {
+    "id": "E08_architecture",
+    "evidence_kind": "Historical assistant explanation, cross-check against code/config during implementation",
+    "source_file": "/home/user/.codex/sessions/2026/09/29/rollout-2026-09-29T13-13-59-01a0c78d-c043-7f90-888f-7a5809f85f34_01a0eb5e-968d-7742-bf28-2eeb3d735578.jsonl",
+    "source_line": 149,
+    "timestamp_utc": "2026-09-29T04:21:35.251Z",
+    "excerpt": "evidence/E08_architecture.txt"
+  },
+  {
+    "id": "E09_weather_overlay",
+    "evidence_kind": "Historical tool output: weather overlay and raw overlay",
+    "source_file": "/home/user/.codex/sessions/2026/10/14/rollout-2026-10-14T12-55-23-01a11103-396a-7a23-97df-aeaa138bf2b0_01a1388c-f032-70b3-abbb-0d81d18b2541.jsonl",
+    "source_line": 55,
+    "timestamp_utc": "2026-10-14T03:55:50.243Z",
+    "excerpt": "evidence/E09_weather_overlay.txt"
+  },
+  {
+    "id": "E10_weather_schedule",
+    "evidence_kind": "Historical assistant launch command; not itself proof of completion",
+    "source_file": "/home/user/.codex/sessions/2026/10/14/rollout-2026-10-14T12-55-23-01a11103-396a-7a23-97df-aeaa138bf2b0_01a1388c-f032-70b3-abbb-0d81d18b2541.jsonl",
+    "source_line": 114,
+    "timestamp_utc": "2026-10-14T03:57:43.505Z",
+    "excerpt": "evidence/E10_weather_schedule.txt"
+  },
+  {
+    "id": "E11_config_tail",
+    "evidence_kind": "Historical tool output: selected saved config tail",
+    "source_file": "/home/user/.codex/sessions/2026/10/13/rollout-2026-10-13T14-03-00-01a133a4-7c6d-7793-8b70-aac285121d21.jsonl",
+    "source_line": 231,
+    "timestamp_utc": "2026-10-13T05:03:31.028Z",
+    "excerpt": "evidence/E11_config_tail.txt"
+  },
+  {
+    "id": "E12_weather_metrics",
+    "evidence_kind": "Historical tool output: metrics JSON readback",
+    "source_file": "/home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl",
+    "source_line": 2008,
+    "timestamp_utc": "2026-10-15T06:43:31.278Z",
+    "excerpt": "evidence/E12_weather_metrics.txt"
+  },
+  {
+    "id": "E13_weather_protocol",
+    "evidence_kind": "Historical assistant protocol explanation; later LongCLIP change supersedes old CLIP backend",
+    "source_file": "/home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl",
+    "source_line": 1621,
+    "timestamp_utc": "2026-10-15T06:27:25.184Z",
+    "excerpt": "evidence/E13_weather_protocol.txt"
+  },
+  {
+    "id": "E14_longclip_code",
+    "evidence_kind": "Historical tool output: final LongCLIP backend code and metrics settings",
+    "source_file": "/home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl",
+    "source_line": 1946,
+    "timestamp_utc": "2026-10-15T06:42:39.853Z",
+    "excerpt": "evidence/E14_longclip_code.txt"
+  },
+  {
+    "id": "E15_longclip_identity",
+    "evidence_kind": "Historical tool output: evaluation CLI, LongCLIP commit and checkpoint SHA256",
+    "source_file": "/home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl",
+    "source_line": 1900,
+    "timestamp_utc": "2026-10-15T06:41:26.109Z",
+    "excerpt": "evidence/E15_longclip_identity.txt"
+  },
+  {
+    "id": "E16_metric_formulas",
+    "evidence_kind": "Historical tool output: evaluator formula documentation; predates LongCLIP backend change",
+    "source_file": "/home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl",
+    "source_line": 1531,
+    "timestamp_utc": "2026-10-15T06:25:05.574Z",
+    "excerpt": "evidence/E16_metric_formulas.txt"
+  },
+  {
+    "id": "E17_gbuffer_helpers",
+    "evidence_kind": "Historical tool output: complete crop/stitch helpers, October 7",
+    "source_file": "/home/user/.codex/sessions/2026/10/07/rollout-2026-10-07T13-44-25-01a114ad-52bd-7680-8028-9e8cd522826f.jsonl",
+    "source_line": 89,
+    "timestamp_utc": "2026-10-07T04:44:49.416Z",
+    "excerpt": "evidence/E17_gbuffer_helpers.txt"
+  },
+  {
+    "id": "E18_gbuffer_runner",
+    "evidence_kind": "Historical tool output: scene788 single_static runner, generation stages",
+    "source_file": "/home/user/.codex/sessions/2026/09/14/rollout-2026-09-14T17-26-13-01a09aac-36be-7f63-9107-7dc27b4092f6_01a09f06-1d17-71d2-baec-818130288926.jsonl",
+    "source_line": 163,
+    "timestamp_utc": "2026-09-15T03:43:09.742Z",
+    "excerpt": "evidence/E18_gbuffer_runner.txt"
+  }
+]

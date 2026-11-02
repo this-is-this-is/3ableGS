@@ -1,0 +1,5 @@
+base_config: base.yaml
+trainer:
+  dynamic_gbuffer:
+    enabled: true
+    mode: balanced

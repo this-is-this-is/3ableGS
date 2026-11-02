@@ -1,0 +1,4 @@
+base_config: base.yaml
+trainer:
+  gbuffer_attention:
+    variant: C1

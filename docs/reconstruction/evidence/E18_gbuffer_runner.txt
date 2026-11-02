@@ -1,0 +1,198 @@
+Historical tool output: scene788 single_static runner, generation stages
+Source: /home/user/.codex/sessions/2026/09/14/rollout-2026-09-14T17-26-13-01a09aac-36be-7f63-9107-7dc27b4092f6_01a09f06-1d17-71d2-baec-818130288926.jsonl:163
+Record timestamp (UTC): 2026-09-15T03:43:09.742Z
+
+Script completed
+Wall time 0.1 seconds
+Output:
+
+#!/usr/bin/env bash
+# Base v1 for scene 788, raw+snow, front camera, 100 frames:
+# single-static top/bottom DR -> full-frame blend ->
+# raw base 30k -> snow material 30k -> environment 3k -> joint 5k -> render/eval.
+# Safe to re-run: completed DR/training/render stages are skipped.
+set -eE -o pipefail
+
+SCENE=788
+FRAMES=100
+END_TS=99
+WEATHERS="raw snow"
+PASSES="basecolor normal roughness metallic"
+DEC_HIDDEN=64
+DEC_LAYERS=2
+MIN_FREE_GB=60
+
+WC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DR_ROOT=/home/user/Desktop/cosmos-transfer1-diffusion-renderer
+EXP="$WC_ROOT/output_dr/788_single_static_100f_base_v1"
+SOURCE="$WC_ROOT/data/waymo/processed/training/788/images"
+GB_ROOT="$WC_ROOT/data/waymo/render_png_788_single_static_100f/gbuffer_frames"
+PBR="$WC_ROOT/output/pbr"
+LOG="$WC_ROOT/logs/s788_single_static_100f_base_v1_$(date +%Y%m%d_%H%M%S).log"
+LATEST_LOG="$WC_ROOT/logs/s788_single_static_100f_base_v1_latest.log"
+STATUS="$WC_ROOT/logs/s788_single_static_100f_base_v1.status"
+PID_FILE="$WC_ROOT/logs/s788_single_static_100f_base_v1.pid"
+
+mkdir -p "$EXP/static_results/gbuffer_frames" "$GB_ROOT" "$WC_ROOT/logs"
+if [ -f "$PID_FILE" ]; then
+    prior_pid=$(cat "$PID_FILE" 2>/dev/null || true)
+    if [ -n "$prior_pid" ] && kill -0 "$prior_pid" 2>/dev/null; then
+        echo "base v1 scene 788 is already running (pid=$prior_pid)"
+        exit 0
+    fi
+fi
+ln -sfn "$(basename "$LOG")" "$LATEST_LOG"
+printf '%s\n' "$$" > "$PID_FILE"
+printf 'RUNNING pid=%s stage=setup started=%s log=%s\n' \
+    "$$" "$(date --iso-8601=seconds)" "$LOG" > "$STATUS"
+
+current_stage=setup
+write_status () {
+    printf 'RUNNING pid=%s stage=%s updated=%s log=%s\n' \
+        "$$" "$current_stage" "$(date --iso-8601=seconds)" "$LOG" > "$STATUS"
+}
+trap 'rc=$?; printf "FAILED rc=%s stage=%s ended=%s log=%s\n" "$rc" "$current_stage" "$(date --iso-8601=seconds)" "$LOG" > "$STATUS"; exit "$rc"' ERR
+trap 'printf "STOPPED signal=TERM stage=%s ended=%s log=%s\n" "$current_stage" "$(date --iso-8601=seconds)" "$LOG" > "$STATUS"; exit 143' TERM
+trap 'printf "STOPPED signal=INT stage=%s ended=%s log=%s\n" "$current_stage" "$(date --iso-8601=seconds)" "$LOG" > "$STATUS"; exit 130' INT
+exec > >(tee -a "$LOG") 2>&1
+
+source /home/user/miniconda3/etc/profile.d/conda.sh
+
+echo "scene 788 base v1: single-static 100f full-frame"
+echo "started: $(date)"
+echo "log: $LOG"
+
+# A fresh run needs roughly the same 44 GB DR workspace and 16 GB PBR output as
+# scene 114. Do not begin a multi-day GPU job if that headroom is unavailable.
+if [ ! -f "$GB_ROOT/snow/0000.0099.basecolor.png" ]; then
+    free_gb=$(df -Pk "$WC_ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
+    if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+        echo "FATAL: ${free_gb} GB free; base v1 requires at least ${MIN_FREE_GB} GB"
+        exit 1
+    fi
+fi
+
+for weather in $WEATHERS; do
+    count=$(find "$SOURCE/$weather" -maxdepth 1 -type f -name '*_0.jpg' | wc -l)
+    if [ "$count" -lt "$FRAMES" ]; then
+        echo "FATAL: expected at least $FRAMES $weather frames, found $count"
+        exit 1
+    fi
+done
+
+# 1-3. Generate the paired G-buffers only when the durable loader copies are
+# incomplete. This keeps the pipeline resumable after its large DR workspace
+# has been cleaned.
+expected_gbuffers=$(( FRAMES * 2 * 4 ))
+present_gbuffers=$(find "$GB_ROOT" -type f -name '*.png' 2>/dev/null | wc -l)
+if [ "$present_gbuffers" -ne "$expected_gbuffers" ]; then
+    current_stage=prepare_dr_inputs; write_status
+    conda activate cosmos-dr
+    for weather in $WEATHERS; do
+    tiled="$EXP/tiled_inputs/$weather"
+    if [ ! -f "$tiled/${weather}_bottom/099.png" ]; then
+        python "$WC_ROOT/tools/prepare_tiled_dr_inputs.py" \
+            --src "$SOURCE/$weather" --dst "$tiled" \
+            --frames "$FRAMES" --label "$weather"
+    fi
+    for position in top bottom; do
+        for frame in $(seq 0 "$END_TS"); do
+            printf -v f3 '%03d' "$frame"
+            clip="$EXP/static_inputs/${weather}_${position}_${f3}"
+            mkdir -p "$clip"
+            for local_frame in $(seq 0 25); do
+                printf -v l3 '%03d' "$local_frame"
+                ln -f "$tiled/${weather}_${position}/${f3}.png" "$clip/${l3}.png"
+            done
+        done
+    done
+    done
+
+# 2. Generate material G-buffers. Keeping all 400 clips in one dataset avoids
+# reloading the 7B model for every source image.
+    current_stage=diffusion_renderer; write_status
+    expected=$(( FRAMES * 2 * 2 * 4 ))
+    present=0
+    for pass_name in $PASSES; do
+        n=$(find "$EXP/static_results/gbuffer_frames" -type f \
+            -name "full.00000.${pass_name}.png" 2>/dev/null | wc -l)
+        present=$((present + n))
+    done
+    if [ "$present" -ne "$expected" ]; then
+        export CUDA_HOME="$CONDA_PREFIX"
+        cd "$DR_ROOT"
+        PYTHONPATH="$DR_ROOT" python cosmos_predict1/diffusion/inference/inference_inverse_renderer_long.py \
+        --checkpoint_dir checkpoints \
+        --diffusion_transformer_dir Diffusion_Renderer_Inverse_Cosmos_7B \
+        --dataset_path "$EXP/static_inputs" \
+        --num_video_frames 57 --stride 32 --pin_mode hybrid \
+        --height 704 --width 1280 --seed 1000 --num_steps 15 --guidance 0 \
+        --inference_passes normal basecolor roughness metallic --normalize_normal false \
+            --save_image_format png --save_video false --video_save_folder "$EXP/static_results"
+    fi
+
+# 3. Select the first frame from each static clip, restore both crops and blend.
+    current_stage=stitch_gbuffers; write_status
+    cd "$WC_ROOT"
+    for weather in $WEATHERS; do
+    for position in top bottom; do
+        tile_dst="$EXP/selected_tiles/gbuffer_frames/${weather}_${position}"
+        mkdir -p "$tile_dst"
+        for frame in $(seq 0 "$END_TS"); do
+            printf -v f3 '%03d' "$frame"
+            printf -v f5 '%05d' "$frame"
+            src="$EXP/static_results/gbuffer_frames/${weather}_${position}_${f3}"
+            for pass_name in $PASSES; do
+                ln -f "$src/full.00000.${pass_name}.png" \
+                    "$tile_dst/full.${f5}.${pass_name}.png"
+            done
+        done
+    done
+    done
+
+    conda activate "$WC_ROOT/.conda"
+    for weather in $WEATHERS; do
+        python tools/stitch_tiled_gbuffers.py \
+        --tile-root "$EXP/selected_tiles" \
+        --dst "$EXP/final_1920x1280/$weather" \
+        --frames "$FRAMES" --condition "$weather" --passes $PASSES
+    done
+
+    python - "$EXP/final_1920x1280" "$GB_ROOT" <<'PY'
+import os, re, shutil, sys
+from pathlib import Path
+src_root, dst_root = map(Path, sys.argv[1:])
+pat = re.compile(r"full\.(\d+)\.(\w+)\.png$")
+for weather in ("raw", "snow"):
+    dst = dst_root / weather
+    dst.mkdir(parents=True, exist_ok=True)
+    for p in sorted((src_root / weather).glob("full.*.png")):
+        match = pat.match(p.name)
+        q = dst / f"0000.{int(match.group(1)):04d}.{match.group(2)}.png"
+        if q.exists():
+            q.unlink()
+        try:
+            os.link(p, q)
+        except OSError:
+            shutil.copyfile(p, q)
+    print(weather, len(list(dst.glob("*.png"))))
+PY
+
+    present_gbuffers=$(find "$GB_ROOT" -type f -name '*.png' | wc -l)
+    if [ "$present_gbuffers" -ne "$expected_gbuffers" ]; then
+        echo "FATAL: expected $expected_gbuffers durable G-buffers, found $present_gbuffers"
+        exit 1
+    fi
+
+    # The renderer emits 26 images per static clip, while stitching consumes
+    # only full.00000.*. Removing this directory reclaims about 40 GB. The
+    # stitched G-buffers in GB_ROOT and every component output remain intact.
+    current_stage=cleanup_dr_temporary_frames; write_status
+    rm -rf "$EXP/static_results"
+    echo "removed temporary DR frames: $EXP/static_results"
+else
+    echo "durable G-buffers complete ($present_gbuffers/$expected_gbuffers); skipping DR"
+    cd "$WC_ROOT"
+    conda activate "$WC_ROOT/.conda"
+fi
+

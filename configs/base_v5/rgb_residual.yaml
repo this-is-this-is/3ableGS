@@ -1,0 +1,35 @@
+# Base v5 display-RGB residual on the native Base-v4 PBR renderer.
+# Camera-only training retains native step 0..30000 (30,001 updates).
+trainer:
+  rgb_joint:
+    enabled: true
+    feature_dim: 8
+    hidden_dim: 32
+    warmup_camera_updates: 2000
+    ramp_camera_updates: 1000
+    pure_pbr_lambda: 0.3
+    max_log_gain: 0.3
+    max_additive: 0.1
+    gain_lambda: 0.001
+    additive_lambda: 0.001
+    lr: 0.001
+  gaussian_optim_general_cfg:
+    correction_feature:
+      lr: 0.0025
+model:
+  Background:
+    rgb_residual:
+      enabled: true
+      feature_dim: 8
+  RigidNodes:
+    rgb_residual:
+      enabled: true
+      feature_dim: 8
+  DeformableNodes:
+    rgb_residual:
+      enabled: true
+      feature_dim: 8
+  SMPLNodes:
+    rgb_residual:
+      enabled: true
+      feature_dim: 8

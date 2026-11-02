@@ -582,15 +582,12 @@ class DrivingDataset(SceneDataset):
         return valid_mask
 
     def split_train_test(self):
-        if self.data_cfg.pixel_source.test_image_stride != 0:
-            test_timesteps = np.arange(
-                # it makes no sense to have test timesteps before the start timestep
-                self.data_cfg.pixel_source.test_image_stride,
-                self.num_img_timesteps,
-                self.data_cfg.pixel_source.test_image_stride,
-            )
-        else:
-            test_timesteps = []
+        from utils.temporal_split import resolve_test_frames
+        test_timesteps = np.asarray(resolve_test_frames(
+            self.num_img_timesteps,
+            test_frame_ranges=self.data_cfg.pixel_source.get("test_frame_ranges"),
+            test_image_stride=self.data_cfg.pixel_source.test_image_stride,
+        ), dtype=int)
         train_timesteps = np.array(
             [i for i in range(self.num_img_timesteps) if i not in test_timesteps]
         )
@@ -628,6 +625,16 @@ class DrivingDataset(SceneDataset):
             delete_out_of_view_points: bool
                 If True, the lidar points that are not visible from the camera will be removed.
         """
+        # Explicit temporal holdouts also exclude their RGB from point-color
+        # initialization. This method runs before split_train_test, so resolve
+        # the same relative ranges here. Keep legacy stride initialization
+        # unchanged for existing checkpoints/experiments.
+        from utils.temporal_split import resolve_test_frames
+        ranges = self.data_cfg.pixel_source.get("test_frame_ranges")
+        initialization_holdout = (
+            set(resolve_test_frames(self.num_img_timesteps, ranges))
+            if ranges is not None else set()
+        )
         for cam in self.pixel_source.camera_data.values():
             lidar_depth_maps = []
             for frame_idx in tqdm(
@@ -645,21 +652,12 @@ class DrivingDataset(SceneDataset):
                     + lidar_infos["lidar_viewdirs"] * lidar_infos["lidar_ranges"]
                 )
                 
-                # project lidar points to the image plane
-                if cam.undistort:
-                    new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(
-                                cam.intrinsics[frame_idx].cpu().numpy(),
-                                cam.distortions[frame_idx].cpu().numpy(),
-                                (cam.WIDTH, cam.HEIGHT),
-                                alpha=1,
-                            )
-                    intrinsic_4x4 = torch.nn.functional.pad(
-                            torch.from_numpy(new_camera_matrix), (0, 1, 0, 1)
-                        ).to(self.device)
-                else:
-                    intrinsic_4x4 = torch.nn.functional.pad(
-                        cam.intrinsics[frame_idx], (0, 1, 0, 1)
-                    )
+                # RGB/G-buffer cv2.undistort keeps K when newCameraMatrix is
+                # omitted. Project depth and sample initial colors with that
+                # same K, matching the camera rays (historical PBR correction).
+                intrinsic_4x4 = torch.nn.functional.pad(
+                    cam.intrinsics[frame_idx], (0, 1, 0, 1)
+                )
                 intrinsic_4x4[3, 3] = 1.0
                 lidar2img = intrinsic_4x4 @ cam.cam_to_worlds[frame_idx].inverse()
                 lidar_points = (
@@ -684,6 +682,10 @@ class DrivingDataset(SceneDataset):
                     _cam_points[:, 1].long(), _cam_points[:, 0].long()
                 ] = depth.squeeze(-1)
                 lidar_depth_maps.append(depth_map)
+                # Still construct a depth map for evaluation; do not retain or
+                # color initialization points from a held-out RGB observation.
+                if frame_idx in initialization_holdout:
+                    continue
                 
                 # used to filter out the lidar points that are visible from the camera
                 visible_indices = torch.arange(

@@ -1,0 +1,6 @@
+User definition
+Source: /home/user/.codex/sessions/2026/10/08/rollout-2026-10-08T15-55-46-01a11421-4704-7271-b4f5-a5191a88939b_01a11a4b-ee42-7232-8a21-664ba3647c82.jsonl:349
+Record timestamp (UTC): 2026-10-13T05:02:52.237Z
+
+base v3에`combo_perceptual_02`를 적용한 것을 base v4라고 정의할게 이 base v4 기준으로 3.3절 Training Objectives and Optimization 부분 다시 작성해줘 Material objective. Illumination objective. Optimization schedule. 흐름으로 가는건 좋은거 같아
+

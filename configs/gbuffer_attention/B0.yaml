@@ -1,0 +1,3 @@
+base_config: base.yaml
+trainer:
+  gbuffer_attention: null

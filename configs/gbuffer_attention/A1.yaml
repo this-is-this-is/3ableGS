@@ -1,0 +1,5 @@
+base_config: base.yaml
+trainer:
+  gbuffer_attention:
+    variant: A1
+    temporal_w: 0.0

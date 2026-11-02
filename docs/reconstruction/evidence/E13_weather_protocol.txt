@@ -1,0 +1,109 @@
+Historical assistant protocol explanation; later LongCLIP change supersedes old CLIP backend
+Source: /home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl:1621
+Record timestamp (UTC): 2026-10-15T06:27:25.184Z
+
+요청한 기준으로 맞췄습니다.
+
+- 씬별 개별 평가
+- 카메라 0의 `000~029` 연속 30프레임
+- particle 제외
+- 원본 카메라 이미지와 Base v4 weather 렌더 비교
+- 논문의 CLIP-S, CLIP-DS 계산식
+- 논문 Table 4 전체 프롬프트
+- ConvNeXt-XL ADE20K, 실제 입출력 모두 384×384
+- Rain/Snow 각각 CLIP-S, CLIP-DS, Sem-CS 계산
+
+기존에는 segmentation 전처리기가 내부에서 다시 512×512로 바꾸는 문제가 있어 [eval_weather_metrics.py](/home/user/Desktop/WeatherCity/tools/eval_weather_metrics.py:173)를 수정했고, 기본 크기도 384×384로 변경했습니다. 실제 processor 입력이 `(1, 3, 384, 384)`인지 검증했습니다.
+
+788씬 평가는 다음 명령어로 실행하면 됩니다.
+
+```bash
+cd /home/user/Desktop/WeatherCity
+mkdir -p logs .cache/matplotlib
+
+scene=788
+
+SCENE="$scene" nohup bash \
+  > "logs/scene${scene}_base_v4_weather_quality_paper_particle_free.log" 2>&1 <<'BASH' &
+
+set -euo pipefail
+
+export CUDA_VISIBLE_DEVICES=0
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export MPLCONFIGDIR="$PWD/.cache/matplotlib"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+scene="${SCENE}"
+run_root="output/pbr/base_v4/scene_${scene}_100f"
+eval_root="${run_root}/weather_quality_paper_particle_free"
+
+mkdir -p "${eval_root}"
+
+for weather in rain snow
+do
+  if [ "${weather}" = "rain" ]; then
+    ckpt="${run_root}/03_rain_joint/checkpoint_final.pth"
+  else
+    ckpt="${run_root}/06_snow_joint/checkpoint_final.pth"
+  fi
+
+  render_dir="${eval_root}/${weather}/frames"
+  metric_file="${eval_root}/${weather}/metrics.json"
+
+  mkdir -p "${render_dir}"
+
+  # Weather material decoder + environment만 렌더링합니다.
+  # particle renderer는 호출하지 않습니다.
+  .conda/bin/python -u tools/export_rgb_sequence.py \
+    --ckpt "${ckpt}" \
+    --weather "${weather}" \
+    --frames 0-29 \
+    --out "${render_dir}"
+
+  .conda/bin/python -u tools/eval_weather_metrics.py \
+    --data_root data/waymo/processed/training \
+    --scenes "${scene}" \
+    --weathers "${weather}" \
+    --cam 0 \
+    --frames 30 \
+    --raw_dirname raw \
+    --edit_dir "${render_dir}" \
+    --clip_model openai/clip-vit-large-patch14 \
+    --seg_model openmmlab/upernet-convnext-xlarge \
+    --prompt_mode full \
+    --directional_mode paper \
+    --seg_height 384 \
+    --seg_width 384 \
+    --batch_size 16 \
+    --device cuda \
+    --out "${metric_file}"
+done
+BASH
+
+echo "PID=$!"
+```
+
+진행 상황:
+
+```bash
+tail -f logs/scene788_base_v4_weather_quality_paper_particle_free.log
+```
+
+결과는 씬 평균과 프레임별 값으로 나뉩니다.
+
+```text
+output/pbr/base_v4/scene_788_100f/weather_quality_paper_particle_free/
+├── rain/
+│   ├── metrics.json
+│   ├── metrics_per_frame.json
+│   └── frames/
+└── snow/
+    ├── metrics.json
+    ├── metrics_per_frame.json
+    └── frames/
+```
+
+다른 씬은 명령어 위쪽의 `scene=788`만 변경하면 됩니다. 해당 씬에도 동일한 Base v4 체크포인트 디렉터리 구조가 있어야 합니다.
+
+논문은 30개 연속 프레임과 위 세 지표의 수식을 명시합니다. 다만 정확한 CLIP 체크포인트와 ConvNeXt segmentation 체크포인트 이름은 공개하지 않았으므로, 현재는 각각 `openai/clip-vit-large-patch14`와 `openmmlab/upernet-convnext-xlarge`를 명시적으로 사용하고 JSON에도 기록합니다. 또한 논문 본문은 Waymo를 1920×1080이라고 적었지만 공식 설정은 1920×1280 원본을 사용하므로, 근거 없는 크롭 없이 공식 설정과 로컬 데이터의 1920×1280을 유지했습니다. [WeatherCity 논문](https://arxiv.org/html/2602.22096v2), [공식 Waymo 설정](https://raw.githubusercontent.com/IRMVLab/WeatherCity/master/configs/datasets/waymo/1cams.yaml)

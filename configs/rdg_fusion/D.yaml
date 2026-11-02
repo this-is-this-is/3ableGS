@@ -1,0 +1,17 @@
+# RDG-inspired one-history, quarter-resolution material/geometry attention.
+trainer:
+  rdg_fusion:
+    enabled: true
+    feature_downscale: 4
+    width: 16
+    start_step: 5000
+    ramp_steps: 1000
+    interval: 8
+    max_gap: 2
+    max_blend: 0.35
+    max_delta_linear: 0.05
+    anchor_weight: 0.01
+    temporal_weight: 0.02
+    lr: 0.001
+    weight_decay: 0.0
+    grad_clip: 1.0

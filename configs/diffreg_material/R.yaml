@@ -1,0 +1,17 @@
+# Sampled local approximation of DiffReg-PBIR, not the full paper pipeline.
+trainer:
+  losses:
+    diffreg_material:
+      enabled: true
+      w: 0.05
+      start_step: 3000
+      ramp_steps: 1000
+      num_samples: 4096
+      radius: 3
+      sigma_g: 0.1
+      sigma_xy: 2.0
+      depth_abs: 0.05
+      depth_rel: 0.02
+      normal_cos: 0.9
+      eps: 0.01
+      seed: 20261031

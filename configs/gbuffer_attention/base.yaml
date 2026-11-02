@@ -1,0 +1,20 @@
+# Full joint training inherits the original scene788 Base v4 protocol.
+# For another existing scene config, use the experiment runner's --checkpoint.
+base_config: ../base_v4/scene788_100f.yaml
+
+trainer:
+  gbuffer_attention:
+    variant: A2
+    width: 32
+    chunk_size: 16384
+    history_offsets: [1, 2, 4]
+    start_step: 5000
+    ramp_steps: 1000
+    temporal_start: 6000
+    temporal_ramp: 1000
+    temporal_w: 0.05
+    anchor_w: 0.01
+    max_residual: 0.02
+    max_blend: 0.5
+    normal_check: false
+    lr: 0.0001

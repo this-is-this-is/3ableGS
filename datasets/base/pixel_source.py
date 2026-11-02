@@ -14,6 +14,7 @@ from torch import Tensor
 from datasets.dataset_meta import DATASETS_CONFIG
 
 logger = logging.getLogger()
+GBUFFER_TYPES = ("basecolor", "metallic", "roughness", "normal")
 
 def idx_to_3d(idx, H, W):
     """
@@ -114,8 +115,17 @@ class CameraData(object):
         # the device to move the camera to
         device: torch.device = torch.device("cpu"),
         load_weather: list = [],
+        load_gbuffer: bool = False,
+        gbuffer_path: str = None,
+        gbuffer_seq_id: int = 0,
+        gbuffer_crop_top: int = 0,
+        gbuffer_size=None,
     ):
         self.images = None
+        self.dynamic_masks = None
+        self.human_masks = None
+        self.vehicle_masks = None
+        self.sky_masks = None
         self.dataset_name = dataset_name
         self.cam_id = cam_id
         self.data_path = data_path
@@ -125,20 +135,30 @@ class CameraData(object):
         self.buffer_downscale = buffer_downscale
         self.device = device
         self.load_weather = ["raw"] + load_weather
+        self.load_gbuffer = load_gbuffer
+        self.gbuffers = None
+        self.gbuffer_path = gbuffer_path
+        self.gbuffer_seq_id = int(gbuffer_seq_id)
+        self.gbuffer_crop_top = int(gbuffer_crop_top)
 
-        assert "rain" in self.load_weather, self.load_weather
-        
         self.cam_name = DATASETS_CONFIG[dataset_name][cam_id]["camera_name"]
         self.original_size = DATASETS_CONFIG[dataset_name][cam_id]["original_size"]
         self.load_size = [
             int(self.original_size[0] / downscale_when_loading),
             int(self.original_size[1] / downscale_when_loading),
         ]
+        self.gbuffer_size = tuple(gbuffer_size or self.original_size)
+        if load_gbuffer and not gbuffer_path:
+            raise ValueError("load_gbuffer=true requires gbuffer_path")
+        if not 0 <= self.gbuffer_crop_top < self.original_size[0] / 2:
+            raise ValueError("gbuffer_crop_top must leave a nonempty image")
         
         # Load the images, dynamic masks, sky masks, etc.
         self.create_all_filelist()
         self.load_calibrations()
         self.load_images()
+        if self.load_gbuffer:
+            self.load_gbuffers()
         self.load_egocar_mask()
         if load_dynamic_mask:
             self.load_dynamic_masks()
@@ -241,6 +261,16 @@ class CameraData(object):
         self.human_mask_filepaths = np.array(human_mask_filepaths)
         self.vehicle_mask_filepaths = np.array(vehicle_mask_filepaths)
         self.sky_mask_filepaths = np.array(sky_mask_filepaths)
+
+        if self.load_gbuffer:
+            self.gbuf_filepaths = {
+                weather: {g: [os.path.join(
+                    self.gbuffer_path, weather,
+                    f"{self.gbuffer_seq_id:04d}.{t:04d}.{g}.png"
+                ) for t in range(self.start_timestep, self.end_timestep)]
+                    for g in GBUFFER_TYPES}
+                for weather in self.load_weather
+            }
         
     def load_images(self):
         self.images = {}
@@ -270,6 +300,58 @@ class CameraData(object):
             # normalize the images to [0, 1]
             self.images[weather] = torch.from_numpy(np.stack(images, axis=0)) / 255
     
+    def load_gbuffers(self):
+        """Keep the aligned teacher targets at native resolution in uint8.
+
+        Restored from the Oct 7 loader record (E17/E18 companion evidence).
+        RGB and targets undergo the same camera undistortion; training compares
+        at the coarser resolution rather than inventing target detail.
+        """
+        self.gbuffers = {}
+        K, D = self.gbuffer_intrinsics()
+        for weather in self.load_weather:
+            self.gbuffers[weather] = {}
+            for kind in GBUFFER_TYPES:
+                images = []
+                for filename in self.gbuf_filepaths[weather][kind]:
+                    with Image.open(filename) as image:
+                        if image.size != self.gbuffer_size[::-1]:
+                            raise ValueError(
+                                f"G-buffer {filename}: size {image.size}, "
+                                f"expected {self.gbuffer_size[::-1]}"
+                            )
+                        value = np.array(image.convert("RGB"))
+                    if self.undistort:
+                        value = cv2.undistort(value, K, D)
+                    if kind in ("metallic", "roughness"):
+                        value = value[..., :1]
+                    images.append(value)
+                self.gbuffers[weather][kind] = torch.from_numpy(np.stack(images))
+
+    def gbuffer_intrinsics(self):
+        K = self.intrinsics[0].cpu().numpy().astype(np.float64).copy()
+        # Undo RGB loading scale before applying the teacher crop/scale.
+        # For the historical downscale_when_loading=1 this is identity.
+        K[0, :] *= self.original_size[1] / self.load_size[1]
+        K[1, :] *= self.original_size[0] / self.load_size[0]
+        scale = self.gbuffer_size[1] / self.original_size[1]
+        K[1, 2] -= self.gbuffer_crop_top
+        K[:2, :] *= scale
+        return K, self.distortions[0].cpu().numpy().astype(np.float64)
+
+    @property
+    def gbuffer_crop_frac(self):
+        return self.gbuffer_crop_top / self.original_size[0]
+
+    def decode_gbuffer(self, weather, frame_idx):
+        out = {}
+        for kind in GBUFFER_TYPES:
+            value = self.gbuffers[weather][kind][frame_idx].float() / 255.0
+            if kind == "normal":
+                value = torch.nn.functional.normalize(value * 2.0 - 1.0, dim=-1)
+            out[f"gbuf_{kind}"] = value
+        return out
+
     def load_egocar_mask(self):
         """
         Since in some datasets, the ego car body is visible in the images,
@@ -472,6 +554,10 @@ class CameraData(object):
             self.distortions = self.distortions.to(device)
         for keys in self.images.keys():
             self.images[keys] = self.images[keys].to(device)
+        if self.gbuffers is not None:
+            for buffers in self.gbuffers.values():
+                for key, value in buffers.items():
+                    buffers[key] = value.to(device)
         if self.egocar_mask is not None:
             self.egocar_mask = self.egocar_mask.to(device)
         if self.dynamic_masks is not None:
@@ -660,6 +746,8 @@ class CameraData(object):
             "lidar_depth_map": lidar_depth_map,
         }
         image_infos = {k: v for k, v in _image_infos.items() if v is not None}
+        if self.gbuffers is not None:
+            image_infos.update(self.decode_gbuffer(weather, frame_idx))
         
         cam_infos = {
             "cam_id": camera_id,

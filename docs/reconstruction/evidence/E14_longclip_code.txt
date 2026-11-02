@@ -1,0 +1,207 @@
+Historical tool output: final LongCLIP backend code and metrics settings
+Source: /home/user/.codex/sessions/2026/10/10/rollout-2026-10-10T18-43-01-01a11afc-d648-7003-be89-54683c9569e6_01a12531-c52f-7162-a93d-aeb18f3d4d2a.jsonl:1946
+Record timestamp (UTC): 2026-10-15T06:42:39.853Z
+
+Script completed
+Wall time 0.1 seconds
+Output:
+
+rain
+ old  0.8177776336669922 0.07030121237039566 0.9464190607875874
+ long 0.8896484375 0.08404541015625 0.9464190607875874
+ tokens 142 142
+ settings longclip 248
+snow
+ old  0.7490028142929077 0.08014114201068878 0.8989795352201563
+ long 0.798828125 0.06427001953125 0.8989795352201563
+ tokens 155 155
+ settings longclip 248
+
+?? model/__pycache__/
+
+   112	
+   113	
+   114	@dataclass
+   115	class ClipBundle:
+   116	    backend: str
+   117	    model: Any
+   118	    processor: Any = None
+   119	    preprocess: Any = None
+   120	    module: Any = None
+   121	    context_length: int = 77
+   122	
+   123	
+   124	def load_clip(
+   125	    model_id: str,
+   126	    device: torch.device,
+   127	    backend: str = "transformers",
+   128	    longclip_repo: str | None = None,
+   129	) -> ClipBundle:
+   130	    if backend == "longclip":
+   131	        if not longclip_repo:
+   132	            raise ValueError("--longclip_repo is required with --clip_backend longclip")
+   133	        repo = Path(longclip_repo).resolve()
+   134	        if not (repo / "model" / "longclip.py").is_file():
+   135	            raise FileNotFoundError(f"LongCLIP implementation not found under {repo}")
+   136	        if not Path(model_id).is_file():
+   137	            raise FileNotFoundError(f"LongCLIP checkpoint not found: {model_id}")
+   138	        if str(repo) not in sys.path:
+   139	            sys.path.insert(0, str(repo))
+   140	        longclip = importlib.import_module("model.longclip")
+   141	        model, preprocess = longclip.load(model_id, device=device)
+   142	        model.eval()
+   143	        return ClipBundle(
+   144	            backend="longclip",
+   145	            model=model,
+   146	            preprocess=preprocess,
+   147	            module=longclip,
+   148	            context_length=int(model.context_length),
+   149	        )
+   150	
+   151	    from transformers import CLIPImageProcessor, CLIPModel, CLIPProcessor, CLIPTokenizerFast
+   152	
+   153	    model = CLIPModel.from_pretrained(model_id).to(device).eval()
+   154	    try:
+   155	        processor = CLIPProcessor.from_pretrained(model_id)
+   156	    except OSError as error:
+   157	        # Some offline Hugging Face caches contain the weights and tokenizer but
+   158	        # not preprocessor_config.json. These are the canonical OpenAI CLIP image
+   159	        # preprocessing values used by ViT-B/32 and ViT-L/14.
+   160	        if "image processor" not in str(error).lower():
+   161	            raise
+   162	        image_processor = CLIPImageProcessor(
+   163	            crop_size={"height": 224, "width": 224},
+   164	            size={"shortest_edge": 224},
+   165	            image_mean=[0.48145466, 0.4578275, 0.40821073],
+   166	            image_std=[0.26862954, 0.26130258, 0.27577711],
+   167	        )
+   168	        tokenizer = CLIPTokenizerFast.from_pretrained(model_id)
+   169	        processor = CLIPProcessor(image_processor=image_processor, tokenizer=tokenizer)
+   170	    return ClipBundle(
+   171	        backend="transformers",
+   172	        model=model,
+   173	        processor=processor,
+   174	        context_length=int(model.config.text_config.max_position_embeddings),
+   175	    )
+   176	
+   177	
+   178	def load_segmenter(model_id: str, device: torch.device):
+   179	    from transformers import AutoImageProcessor, AutoModelForSemanticSegmentation
+   180	
+   181	    model = AutoModelForSemanticSegmentation.from_pretrained(model_id).to(device).eval()
+   182	    processor = AutoImageProcessor.from_pretrained(model_id)
+   183	    return model, processor
+   184	
+   185	
+   186	@torch.no_grad()
+   187	def clip_image_embeddings(bundle: ClipBundle, paths: list[Path], device, batch_size: int):
+   188	    """Raw projected CLIP image embeddings, in the order given.
+   189	
+   190	    Do not normalize each embedding here. CLIP-S applies cosine similarity
+   191	    directly, while the paper's CLIP-DS formula takes the difference of the raw
+   192	    embeddings before applying cosine similarity.
+   193	    """
+   194	    out = []
+   195	    for start in range(0, len(paths), batch_size):
+   196	        images = [Image.open(p).convert("RGB") for p in paths[start : start + batch_size]]
+   197	        if bundle.backend == "longclip":
+   198	            inputs = torch.stack([bundle.preprocess(image) for image in images]).to(device)
+   199	            feats = bundle.model.encode_image(inputs)
+   200	        else:
+   201	            inputs = bundle.processor(images=images, return_tensors="pt").to(device)
+   202	            feats = bundle.model.get_image_features(**inputs)
+   203	            if hasattr(feats, "pooler_output"):
+   204	                feats = feats.pooler_output
+   205	        out.append(feats.cpu())
+   206	    return torch.cat(out, dim=0)
+   207	
+   208	
+   209	@torch.no_grad()
+   210	def clip_text_embedding(
+   211	    bundle: ClipBundle, text: str, device
+   212	) -> tuple[torch.Tensor, int, int]:
+   213	    """Returns the raw text embedding plus (kept, total) token counts.
+   214	
+   215	    The tokenizer truncates at the encoder's context length; the counts make a
+   216	    silently cut prompt visible instead of letting it pass as the full text.
+   217	    """
+   218	    if bundle.backend == "longclip":
+   219	        total = len(bundle.module._tokenizer.encode(text)) + 2
+   220	        inputs = bundle.module.tokenize(
+   221	            [text], context_length=bundle.context_length, truncate=True
+   222	        ).to(device)
+   223	        kept = min(total, bundle.context_length)
+   224	        feats = bundle.model.encode_text(inputs)
+   225	        return feats.cpu()[0], kept, total
+   226	
+   227	    full = bundle.processor.tokenizer(text, truncation=False)["input_ids"]
+   228	    inputs = bundle.processor(
+   229	        text=[text], return_tensors="pt", padding=True, truncation=True
+   230	    ).to(device)
+   231	    kept = int(inputs["input_ids"].shape[-1])
+   232	    feats = bundle.model.get_text_features(**inputs)
+   233	    if hasattr(feats, "pooler_output"):
+   234	        feats = feats.pooler_output
+   235	    return feats.cpu()[0], kept, len(full)
+   345	                value = entry.get(k) if entry else None
+   346	                row += f"{value:<14.4f}" if isinstance(value, float) else f"{'-':<14}"
+   347	        print(row)
+   348	
+   349	    print("-" * len(header))
+   350	    row = f"{'MEAN':<8}"
+   351	    for w in weathers:
+   352	        keys = ["clip_s", "clip_ds", "sem_cs"] if (w != "fog" or fog_full) else ["clip_ds"]
+   353	        for k in keys:
+   354	            value = results["mean_over_scenes"].get(w, {}).get(k)
+   355	            row += f"{value:<14.4f}" if isinstance(value, float) else f"{'-':<14}"
+   356	    print(row)
+   357	    if "fog" in weathers and not fog_full:
+   358	        print("\nfog: CLIP-S / Sem-CS omitted -- fog removes the content those two measure.")
+   359	        print("     (they are still in the JSON; --fog_full prints them)")
+   360	
+   361	
+   362	def main() -> None:
+   363	    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+   364	    parser.add_argument("--data_root", default="data/waymo/processed/training")
+   365	    parser.add_argument("--scenes", nargs="+", required=True)
+   366	    parser.add_argument("--weathers", nargs="+", default=["rain", "snow", "fog"], choices=list(PROMPTS))
+   367	    parser.add_argument("--cam", type=int, default=0)
+   368	    parser.add_argument("--frames", type=int, default=30, help="First N frames per scene.")
+   369	    parser.add_argument("--raw_dirname", default="raw")
+   370	    parser.add_argument(
+   371	        "--edit_dir",
+   372	        help=(
+   373	            "Predicted-image directory for a single scene/weather evaluation. "
+   374	            "Files must be named NNN.png; otherwise edited images are read from the dataset."
+   375	        ),
+   376	    )
+   377	    parser.add_argument(
+   378	        "--frame_indices", nargs="+", type=int,
+   379	        help="Only evaluate these zero-based frame indices (for example the held-out split).",
+   380	    )
+   381	    parser.add_argument("--clip_model", default="openai/clip-vit-large-patch14")
+   382	    parser.add_argument(
+   383	        "--clip_backend", default="transformers", choices=["transformers", "longclip"],
+   384	        help="CLIP implementation. LongCLIP uses its paired image/text encoders and 248 tokens.",
+   385	    )
+   386	    parser.add_argument(
+   387	        "--longclip_repo", default="third_party/Long-CLIP",
+   388	        help="Official LongCLIP repository used by --clip_backend longclip.",
+   389	    )
+   390	    parser.add_argument("--seg_model", default="openmmlab/upernet-convnext-xlarge")
+   391	    parser.add_argument("--skip_sem_cs", action="store_true", help="CLIP metrics only (no segmentation model).")
+   392	    parser.add_argument("--prompt_mode", default="full", choices=["full", "short"])
+   393	    parser.add_argument(
+   394	        "--directional_mode", default="paper", choices=["paper", "delta"],
+   395	        help="'paper': project onto f(T). 'delta': onto f(T)-f(neutral), the usual definition.",
+   396	    )
+   397	    parser.add_argument(
+   398	        "--seg_height", type=int, default=384,
+   399	        help="Segmentation input/output height (WeatherCity paper: 384).",
+   400	    )
+   401	    parser.add_argument(
+   402	        "--seg_width", type=int, default=384,
+   403	        help="Segmentation input/output width (WeatherCity paper: 384).",
+   404	    )
+   405	    parser.add_argument("--batch_size", type=int, default=16)
+

@@ -31,7 +31,100 @@ class RigidNodes_feature(FeatureGaussians):
         """
         get the mask for valid points
         """
-        return self.instances_fv[self.cur_frame][self.point_ids[..., 0]]
+        return self.get_instance_valid_mask()[self.point_ids[..., 0]]
+
+    def _training_pose_brackets(self):
+        """Find nearest *observed training* poses separately for each instance.
+
+        An object with training observations on only one side holds its nearest
+        available pose. Objects never observed during training have no supported
+        test pose and are hidden instead of reading the heldout parameter row.
+        """
+        frame = int(self.cur_frame)
+        training = getattr(self, "train_frame_ids", None)
+        count = self.num_instances
+        device = self.instances_fv.device
+        current = torch.full((count,), frame, dtype=torch.long, device=device)
+        if training is None:
+            # Preserve the previous single-frame evaluation behavior for
+            # callers that do not supply a split.
+            left, right = current.clone(), current.clone()
+            if frame - 1 > 0 and frame + 1 < self.num_frames:
+                valid = self.instances_fv[frame - 1] & self.instances_fv[frame + 1]
+                left[valid], right[valid] = frame - 1, frame + 1
+            alpha = (left != right).to(self.instances_trans.dtype) * .5
+            return left, right, alpha, torch.ones(count, dtype=torch.bool, device=device)
+        if isinstance(training, torch.Tensor):
+            training = training.detach().cpu().tolist()
+        training = tuple(sorted(set(int(value) for value in training)))
+        if not training or training[0] < 0 or training[-1] >= self.num_frames:
+            raise ValueError("train_frame_ids must contain valid training frame indices.")
+        key = (frame, training, self.instances_fv.data_ptr(),
+               self.instances_fv._version, tuple(self.instances_fv.shape))
+        cached = getattr(self, "_training_pose_bracket_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        ids = torch.tensor(training, dtype=torch.long, device=device)
+        valid = self.instances_fv[ids].bool()
+        rows = ids[:, None].expand(-1, count)
+        before = torch.where(valid & (rows <= frame), rows, -1).amax(dim=0)
+        after = torch.where(valid & (rows >= frame), rows, self.num_frames).amin(dim=0)
+        known = valid.any(dim=0)
+        left = torch.where(before >= 0, before, after)
+        right = torch.where(after < self.num_frames, after, before)
+        left = torch.where(known, left, 0)
+        right = torch.where(known, right, 0)
+        alpha = ((frame - left).to(self.instances_trans.dtype)
+                 / (right - left).clamp_min(1)).clamp(0, 1)
+        result = (left, right, alpha, known)
+        self._training_pose_bracket_cache = (key, result)
+        return result
+
+    def get_instance_valid_mask(self):
+        """Use current visibility annotations only for train-supported objects."""
+        valid = self.instances_fv[self.cur_frame]
+        if self.in_test_set and getattr(self, "train_frame_ids", None) is not None:
+            valid = valid & self._training_pose_brackets()[3]
+        return valid
+
+    def _regularization_frames_are_training(self, *frame_ids):
+        training = getattr(self, "train_frame_ids", None)
+        if training is None:
+            return True
+        if isinstance(training, torch.Tensor):
+            training = training.detach().cpu().tolist()
+        return set(int(frame) for frame in frame_ids).issubset(set(training))
+
+    def _pose_at_current_frame(self, values, quaternion=False):
+        """Interpolate train-only translations, root rotations, or SMPL joints."""
+        if not self.in_test_set:
+            return values[self.cur_frame]
+        left, right, alpha, known = self._training_pose_brackets()
+        instance_ids = torch.arange(self.num_instances, device=values.device)
+        first, second = values[left, instance_ids], values[right, instance_ids]
+        alpha = alpha.reshape((self.num_instances,) + (1,) * (first.ndim - 1))
+        if quaternion:
+            # Tensor fractions must broadcast over joints and quaternion
+            # components; the old scalar-fraction helper cannot do both.
+            first = torch.nn.functional.normalize(first, dim=-1)
+            second = torch.nn.functional.normalize(second, dim=-1)
+            dot = (first * second).sum(dim=-1, keepdim=True)
+            second = torch.where(dot < 0, -second, second)
+            dot = dot.abs().clamp(0, 1)
+            angle = torch.acos(dot.clamp_max(1 - 1e-7))
+            denom = torch.sin(angle).clamp_min(1e-7)
+            spherical = (torch.sin((1 - alpha) * angle) * first
+                         + torch.sin(alpha * angle) * second) / denom
+            linear = first + alpha * (second - first)
+            result = torch.nn.functional.normalize(
+                torch.where(dot > .9995, linear, spherical), dim=-1)
+            fallback = torch.zeros_like(result)
+            fallback[..., 0] = 1
+        else:
+            result = first + alpha * (second - first)
+            fallback = torch.zeros_like(result)
+        valid = known.reshape((self.num_instances,) + (1,) * (result.ndim - 1))
+        return torch.where(valid, result, fallback)
 
     def set_cur_frame(self, frame_id: int):
         self.cur_frame = frame_id
@@ -98,6 +191,7 @@ class RigidNodes_feature(FeatureGaussians):
         # else:
         #     shs[:, 0, :3] = torch.logit(init_colors, eps=1e-10)
         self._features = Parameter(torch.zeros((self.num_points, self.feature_dim)).to(self.device))
+        self._initialize_correction_features()
 
         self._opacities = Parameter(torch.logit(0.1 * torch.ones(self.num_points, 1, device=self.device)))
 
@@ -173,6 +267,8 @@ class RigidNodes_feature(FeatureGaussians):
                     dup_quats,
                     dup_ids,
                 ) = self.dup_gaussians(dups)
+
+                self._densify_correction_features(splits, dups, nsamps)
 
                 self._means = Parameter(torch.cat([self._means.detach(), split_means, dup_means], dim=0))
                 # self.colors_all = Parameter(torch.cat([self.colors_all.detach(), split_colors, dup_colors], dim=0))
@@ -250,6 +346,7 @@ class RigidNodes_feature(FeatureGaussians):
         self._quats = Parameter(self._quats[~culls].detach())
         # self.colors_all = Parameter(self.colors_all[~culls].detach())
         self._features = Parameter(self._features[~culls].detach())
+        self._filter_correction_features(~culls)
 
         self._opacities = Parameter(self._opacities[~culls].detach())
         self.point_ids = self.point_ids[~culls]
@@ -320,40 +417,13 @@ class RigidNodes_feature(FeatureGaussians):
         """
         assert means.shape[0] == self.point_ids.shape[0], \
             "its a bug here, we need to pass the mask for points_ids"
-        if self.in_test_set and (
-                self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
-        ):
-            # use the previous and next frame to interpolate the pose
-            _quats_prev_frame = self.instances_quats[self.cur_frame - 1]
-            _quats_next_frame = self.instances_quats[self.cur_frame + 1]
-            _quats_cur_frame = self.instances_quats[self.cur_frame]
-            interpolated_quats = interpolate_quats(_quats_prev_frame, _quats_next_frame)
-
-            inter_valid_mask = self.instances_fv[self.cur_frame - 1] & self.instances_fv[self.cur_frame + 1]
-            quats_cur_frame = torch.where(
-                inter_valid_mask[:, None], interpolated_quats, _quats_cur_frame
-            )
-        else:
-            quats_cur_frame = self.instances_quats[self.cur_frame]  # (num_instances, 4)
+        quats_cur_frame = self._pose_at_current_frame(self.instances_quats, quaternion=True)
         rot_cur_frame = quat_to_rotmat(
             self.quat_act(quats_cur_frame)
         )  # (num_instances, 3, 3)
         rot_per_pts = rot_cur_frame[self.point_ids[..., 0]]  # (num_points, 3, 3)
 
-        if self.in_test_set and (
-                self.cur_frame - 1 > 0 and self.cur_frame + 1 < self.num_frames
-        ):
-            _prev_ins_trans = self.instances_trans[self.cur_frame - 1]
-            _next_ins_trans = self.instances_trans[self.cur_frame + 1]
-            _cur_ins_trans = self.instances_trans[self.cur_frame]
-            interpolated_trans = (_prev_ins_trans + _next_ins_trans) * 0.5
-
-            inter_valid_mask = self.instances_fv[self.cur_frame - 1] & self.instances_fv[self.cur_frame + 1]
-            trans_cur_frame = torch.where(
-                inter_valid_mask[:, None], interpolated_trans, _cur_ins_trans
-            )
-        else:
-            trans_cur_frame = self.instances_trans[self.cur_frame]  # (num_instances, 3)
+        trans_cur_frame = self._pose_at_current_frame(self.instances_trans)
         trans_per_pts = trans_cur_frame[self.point_ids[..., 0]]
 
         # transform the means to world space
@@ -369,7 +439,7 @@ class RigidNodes_feature(FeatureGaussians):
         """
         assert quats.shape[0] == self.point_ids.shape[0], \
             "its a bug here, we need to pass the mask for points_ids"
-        global_quats_cur_frame = self.instances_quats[self.cur_frame]
+        global_quats_cur_frame = self._pose_at_current_frame(self.instances_quats, quaternion=True)
         global_quats_per_pts = global_quats_cur_frame[self.point_ids[..., 0]]
 
         global_quats_per_pts = self.quat_act(global_quats_per_pts)
@@ -394,14 +464,14 @@ class RigidNodes_feature(FeatureGaussians):
         #     rgbs = torch.clamp(rgbs + 0.5, 0.0, 1.0)
         # else:
         #     rgbs = torch.sigmoid(colors[:, 0, :])
-        rgbs = self.mlp_color[weather](self._features)
 
         valid_mask = self.get_pts_valid_mask()
 
         activated_opacities = self.get_opacity * valid_mask.float().unsqueeze(-1)
         activated_scales = self.get_scaling
         activated_rotations = self.quat_act(world_quats)
-        actovated_colors = rgbs
+        actovated_colors = self.gbuffer(
+            weather, activated_rotations, activated_scales, world_means, cam)
 
         # collect gaussians information
         gs_dict = dict(
@@ -412,6 +482,7 @@ class RigidNodes_feature(FeatureGaussians):
             _quats=activated_rotations[filter_mask],
         )
 
+        self._add_correction_payload(gs_dict, filter_mask)
         # check nan and inf in gs_dict
         for k, v in gs_dict.items():
             if torch.isnan(v).any():
@@ -468,7 +539,9 @@ class RigidNodes_feature(FeatureGaussians):
                 trans_cfg = temporal_smooth_reg.get("trans", None)
                 if trans_cfg is not None:
                     fi_interval = random.randint(1, trans_cfg.smooth_range)
-                    if self.cur_frame >= fi_interval and self.cur_frame < self.num_frames - fi_interval:
+                    if (self.cur_frame >= fi_interval and self.cur_frame < self.num_frames - fi_interval
+                            and self._regularization_frames_are_training(
+                                self.cur_frame - fi_interval, self.cur_frame, self.cur_frame + fi_interval)):
                         valid_mask = (
                                 self.instances_fv[self.cur_frame - fi_interval] & \
                                 self.instances_fv[self.cur_frame + fi_interval] & \
@@ -519,6 +592,7 @@ class RigidNodes_feature(FeatureGaussians):
             self._scales = Parameter(self._scales[mask])
             self._quats = Parameter(self._quats[mask])
             self._features = Parameter(self._features[mask])
+            self._filter_correction_features(mask)
             self._opacities = Parameter(self._opacities[mask])
             self.point_ids = self.point_ids[mask]
 
@@ -535,6 +609,8 @@ class RigidNodes_feature(FeatureGaussians):
                     "point_ids": self.point_ids[self.point_ids[..., 0] == id],
                 }
                 gaussian_dict[id] = instance_raw_dict
+                if self.rgb_residual_enabled:
+                    instance_raw_dict["_correction_features"] = self._correction_features[self.point_ids[..., 0] == id]
         return gaussian_dict
 
     def replace_instances(self, replace_dict: Dict[int, int]) -> None:
@@ -555,6 +631,9 @@ class RigidNodes_feature(FeatureGaussians):
             self._scales = Parameter(torch.cat([self._scales, new_gaussian["_scales"]], dim=0))
             self._quats = Parameter(torch.cat([self._quats, new_gaussian["_quats"]], dim=0))
             self._features = Parameter(torch.cat([self._features, new_gaussian["_features"]], dim=0))
+            if self.rgb_residual_enabled:
+                self._correction_features = Parameter(torch.cat(
+                    [self._correction_features, new_gaussian["_correction_features"]], dim=0))
             self._opacities = Parameter(torch.cat([self._opacities, new_gaussian["_opacities"]], dim=0))
             # keeps original point ids
             self.point_ids = torch.cat([self.point_ids, torch.full_like(new_gaussian["point_ids"], ins_id)], dim=0)

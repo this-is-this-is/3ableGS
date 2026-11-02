@@ -1,0 +1,4 @@
+# Base v4 defaults retain Base v3's scene 094 / 100-frame data protocol.
+base_config:
+  - ../base_v3/base.yaml
+  - combo_perceptual_02.yaml

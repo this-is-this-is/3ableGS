@@ -1,0 +1,76 @@
+Historical tool output: config excerpts
+Source: /home/user/.codex/sessions/2026/10/12/rollout-2026-10-12T10-12-30-01a12dab-1a2d-7983-aaf4-071800e4f910.jsonl:120
+Record timestamp (UTC): 2026-10-12T01:21:43.502Z
+
+Script completed
+Wall time 0.1 seconds
+Output:
+
+base_config: ../base_v3/scene788.yaml
+trainer:
+  losses:
+    rgb:
+      w: 0.7
+    ssim:
+      w: 0.3
+    boundary:
+      enabled: true
+      start_step: 5000
+      ramp_steps: 1000
+      rgb_w: 0.0
+      gradient_w: 0.0
+      perceptual_w: 0.02
+      edge_threshold: 0.05
+      radius: 2
+      patch_size: 128
+      num_patches: 4
+      min_valid_fraction: 0.99
+model:
+  Background:
+    ctrl:
+      stop_split_at: 25000
+      stop_reset_at: 20000
+base_config: ../base_v3/scene788.yaml
+base_config: ../base_v3/scene788.yaml
+trainer:
+  losses:
+    rgb:
+      w: 0.7
+    ssim:
+      w: 0.3
+    boundary:
+      enabled: true
+      start_step: 5000
+      ramp_steps: 1000
+      rgb_w: 0.0
+      gradient_w: 0.005
+      perceptual_w: 0.01
+      edge_threshold: 0.05
+      radius: 2
+      patch_size: 128
+      num_patches: 4
+      min_valid_fraction: 0.99
+model:
+  Background:
+    ctrl:
+      stop_split_at: 25000
+      stop_reset_at: 20000
+base_config: ../base_v3/scene788.yaml
+
+# Same total sampled LPIPS area as four 128x128 crops, but with more context.
+trainer:
+  losses:
+    boundary:
+      enabled: true
+      start_step: 5000
+      ramp_steps: 1000
+      rgb_w: 0.0
+      gradient_w: 0.0
+      perceptual_w: 0.01
+      edge_threshold: 0.05
+      radius: 2
+      patch_size: 256
+      num_patches: 1
+      min_valid_fraction: 0.99
+sed: can't read WeatherCity/configs/base_v3/base.yaml: No such file or directory
+

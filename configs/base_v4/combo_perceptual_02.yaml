@@ -1,0 +1,26 @@
+# Historical Base v4 overlay: Base v3 + combo_perceptual_02.
+# Merge after a Base v3 scene config; this file contains no data/model defaults.
+# Source: docs/reconstruction/evidence/E03_combo_overlay.txt.
+trainer:
+  losses:
+    rgb:
+      w: 0.7
+    ssim:
+      w: 0.3
+    boundary:
+      enabled: true
+      start_step: 5000
+      ramp_steps: 1000
+      rgb_w: 0.0
+      gradient_w: 0.0
+      perceptual_w: 0.02
+      edge_threshold: 0.05
+      radius: 2
+      patch_size: 128
+      num_patches: 4
+      min_valid_fraction: 0.99
+model:
+  Background:
+    ctrl:
+      stop_split_at: 25000
+      stop_reset_at: 20000

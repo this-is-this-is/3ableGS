@@ -85,13 +85,13 @@ class DeformableNodes_feature(RigidNodes_feature):
         #     rgbs = torch.clamp(rgbs + 0.5, 0.0, 1.0)
         # else:
         #     rgbs = torch.sigmoid(colors[:, 0, :])
-        rgbs = self.mlp_color[weather](self._features)
 
         valid_mask = self.get_pts_valid_mask()
 
         activated_opacities = self.get_opacity * valid_mask.float().unsqueeze(-1)
         activated_rotations = self.quat_act(world_quats)
-        actovated_colors = rgbs
+        actovated_colors = self.gbuffer(
+            weather, activated_rotations, activated_scales, world_means, cam)
 
         # collect gaussians information
         gs_dict = dict(
@@ -102,6 +102,7 @@ class DeformableNodes_feature(RigidNodes_feature):
             _quats=activated_rotations[filter_mask],
         )
 
+        self._add_correction_payload(gs_dict, filter_mask)
         # check nan in gs_dict
         for k, v in gs_dict.items():
             if torch.isnan(v).any():
@@ -187,6 +188,9 @@ class DeformableNodes_feature(RigidNodes_feature):
             self._scales = Parameter(torch.cat([self._scales, new_gaussian["_scales"]], dim=0))
             self._quats = Parameter(torch.cat([self._quats, new_gaussian["_quats"]], dim=0))
             self._features = Parameter(torch.cat([self._features, new_gaussian["_features"]], dim=0))
+            if self.rgb_residual_enabled:
+                self._correction_features = Parameter(torch.cat(
+                    [self._correction_features, new_gaussian["_correction_features"]], dim=0))
             self._opacities = Parameter(torch.cat([self._opacities, new_gaussian["_opacities"]], dim=0))
             # keeps original point ids
             self.point_ids = torch.cat([self.point_ids, torch.full_like(new_gaussian["point_ids"], ins_id)], dim=0)

@@ -1,0 +1,66 @@
+# Phase E: inherit the exact raw checkpoint's topology, data and camera response.
+# Canonical historical run: 38 -> 64 -> 64 -> 4, gt_relative, raw base frozen.
+base_config_from_checkpoint: true
+trainer:
+  type: models.trainers.scene_graph_pbr_weather.MultiTrainer_pbr_weather
+  optim:
+    use_grad_scaler: false
+    cache_buffer_freq: -1
+  weather_training:
+    enabled: true
+    weather: snow
+    stage: material
+    material_classes: [Background]
+    weather_strength: 1.0
+    material_lr: 0.0001
+    environment_lr: 0.001
+    weight_decay: 0.0
+    logit_eps: 0.0001
+    charbonnier_eps: 0.001
+    paired_target_mode: gt_relative
+    target_albedo_delta_cap: 4.0
+    target_roughness_delta_cap: 5.0
+    material_decoder:
+      hidden_dim: 64
+      num_hidden_layers: 2
+      albedo_delta_cap: 4.0
+      roughness_delta_cap: 5.0
+      world_up: [0.0, 0.0, 1.0]
+      detach_inputs: true
+    mask:
+      exclude_dynamic: true
+      min_opacity: 0.5
+      normal_cos_min: 0.5
+      base_albedo_error_max: 0.25
+      base_roughness_error_max: 0.35
+      erode_px: 1
+      min_valid_pixels: 64
+    losses:
+      paired_albedo: {w: 1.0}
+      paired_roughness: {w: 0.5}
+      absolute_albedo: {w: 0.1}
+      absolute_roughness: {w: 0.05}
+      delta_albedo_reg: {w: 0.001}
+      delta_roughness_reg: {w: 0.001}
+      rgb_surface: {w: 0.8}
+      rgb_sky: {w: 0.1}
+      ssim: {w: 0.02}
+model:
+  EnvLight:
+    reg:
+      weather_residual:
+        magnitude: {w: 0.001}
+        tv: {w: 0.001}
+data:
+  preload_device: cpu
+  pixel_source:
+    load_gbuffer: true
+render:
+  render_full: false
+  render_test: true
+  render_novel: null
+logging:
+  vis_freq: 0
+  print_freq: 250
+  saveckpt_freq: 5000
+  save_seperate_video: true

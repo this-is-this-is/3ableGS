@@ -197,8 +197,9 @@ class BasicTrainer(nn.Module):
 
             class_optim_cfg = class_cfg["optim"]
 
-            if not hasattr(class_optim_cfg, component_name):
-                component_name = component_name.split(".")[0]
+            # A head such as mlp.raw.normal_residual inherits mlp.raw's LR.
+            while component_name not in class_optim_cfg and "." in component_name:
+                component_name = component_name.rsplit(".", 1)[0]
             raw_optim_cfg = class_optim_cfg.get(component_name, None)
             assert raw_optim_cfg is not None, f"param group {params_name} not found in config"
 
@@ -244,7 +245,7 @@ class BasicTrainer(nn.Module):
     
     def _init_losses(self) -> None:
         sky_opacity_loss_fn = None
-        if "Sky" in self.models:
+        if "Sky" in self.models or "EnvLight" in self.models:
             if self.losses_dict.mask.opacity_loss_type == "bce":
                 from models.losses import binary_cross_entropy
                 sky_opacity_loss_fn = lambda pred, gt: binary_cross_entropy(pred, gt, reduction="mean")
@@ -362,6 +363,10 @@ class BasicTrainer(nn.Module):
         
         return camera_dict
 
+    def gaussian_weather(self, class_name, weather):
+        """Select a class's material head; residual trainers may retain raw nodes."""
+        return weather
+
     def collect_gaussians(
         self,
         cam: dataclass_camera,
@@ -377,7 +382,7 @@ class BasicTrainer(nn.Module):
             "class_labels": [],
         }
         for class_name in self.gaussian_classes.keys():
-            gs = self.models[class_name].get_gaussians(cam, weather)
+            gs = self.models[class_name].get_gaussians(cam, self.gaussian_weather(class_name, weather))
             if gs is None:
                 continue
     
@@ -643,6 +648,8 @@ class BasicTrainer(nn.Module):
         
         # compute gaussian reg loss
         for class_name in self.gaussian_classes.keys():
+            if self.models[class_name].num_points == 0:
+                continue
             class_reg_loss = self.models[class_name].compute_reg_loss(weather)
             for k, v in class_reg_loss.items():
                 loss_dict[f"{class_name}_{k}"] = v
@@ -724,7 +731,11 @@ class BasicTrainer(nn.Module):
         Load model from checkpoint.
         """
         logger.info(f"Loading checkpoint from {ckpt_path}")
-        state_dict = torch.load(ckpt_path)
+        # Checkpoints are produced locally by this training code and include
+        # optimizer/RNG metadata that is outside PyTorch's tensor-only safe
+        # subset. PyTorch 2.6+ defaults to weights_only=True, so state the
+        # trusted local-checkpoint contract explicitly.
+        state_dict = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         self.load_state_dict(state_dict, load_only_model=load_only_model, strict=True)
         
     def save_checkpoint(

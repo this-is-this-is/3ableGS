@@ -1,0 +1,5 @@
+# Loss-only overlay. The runner copies the recorded Base v4 configuration.
+trainer:
+  losses:
+    diffreg_material:
+      enabled: false

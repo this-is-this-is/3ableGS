@@ -1,0 +1,3 @@
+base_config:
+  - scene788_100f.yaml
+  - rgb_joint.yaml

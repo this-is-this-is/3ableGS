@@ -1,0 +1,7 @@
+# Inference-only control: apply to B0 weights with the pilot --steps 0 workflow.
+base_config: base.yaml
+trainer:
+  gbuffer_attention:
+    variant: H0
+    temporal_w: 0.0
+    anchor_w: 0.0

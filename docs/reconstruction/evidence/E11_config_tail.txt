@@ -1,0 +1,164 @@
+Historical tool output: selected saved config tail
+Source: /home/user/.codex/sessions/2026/10/13/rollout-2026-10-13T14-03-00-01a133a4-7c6d-7793-8b70-aac285121d21.jsonl:231
+Record timestamp (UTC): 2026-10-13T05:03:31.028Z
+
+   250	        w: 0.2
+   251	      voxel_deformer_reg:
+   252	        lambda_std_w: 0.6
+   253	        lambda_std_w_rest: 0.5
+   254	        lambda_w_norm: 0.6
+   255	        lambda_w_rest_norm: 0.3
+   256	    feature:
+   257	      feature_dim: 32
+   258	    optim:
+   259	      xyz:
+   260	        lr: 0.00016
+   261	        lr_final: 1.6e-06
+   262	        scale_factor: 3.0
+   263	      rotation:
+   264	        lr: 0.005
+   265	      feature:
+   266	        lr: 0.0025
+   267	      mlp:
+   268	        lr: 0.0001
+   269	      sh_dc:
+   270	        lr: 0.005
+   271	      sh_rest:
+   272	        lr: 0.00025
+   273	      ins_rotation:
+   274	        lr: 1.0e-05
+   275	        lr_final: 5.0e-06
+   276	      ins_translation:
+   277	        lr: 0.0005
+   278	        lr_final: 0.0001
+   279	      smpl_rotation:
+   280	        lr: 5.0e-05
+   281	        lr_final: 1.0e-05
+   282	      w_dc_vox:
+   283	        lr: 0.0001
+   284	        lr_final: 1.0e-05
+   285	        opt_after: 10000
+   286	    ctrl:
+   287	      sh_degree: 1
+   288	      opacity_init_value: 0.99
+   289	      ball_gaussians: false
+   290	      constrain_xyz_offset: false
+   291	      knn_update_interval: 100
+   292	      knn_neighbors: 3
+   293	      use_voxel_deformer: true
+   294	      freeze_x: false
+   295	      freeze_o: false
+   296	      freeze_q: false
+   297	      freeze_s: false
+   298	      freeze_feature: false
+   299	      freeze_shs_dc: false
+   300	      freeze_shs_rest: false
+   301	    raw_material:
+   302	      decoder:
+   303	        activation: leaky_relu
+   304	        negative_slope: 0.01
+   305	      normal_residual:
+   306	        enabled: true
+   307	        space: gaussian_local_tangent
+   308	        max_tangent: 0.5
+   309	        regularization_weight: 0.01
+   310	        seed: 15015
+   311	  EnvLight:
+   312	    type: models.pbr.HDREnvLight
+   313	    params:
+   314	      resolution: 64
+   315	      n_mips: 5
+   316	      brdf_lut_size: 64
+   317	      ggx_tail_resolution: 16
+   318	    optim:
+   319	      all:
+   320	        lr: 0.01
+   321	        lr_final: 0.001
+   322	        opt_after: 3000
+   323	    reg:
+   324	      tv:
+   325	        w: 0.001
+   326	  Affine:
+   327	    type: models.modules.AffineTransform
+   328	    params:
+   329	      embedding_dim: 4
+   330	      base_mlp_layer_width: 64
+   331	      pixel_affine: false
+   332	    optim:
+   333	      all:
+   334	        lr: 1.0e-05
+   335	        weight_decay: 1.0e-06
+   336	  CamPose:
+   337	    type: models.modules.CameraOptModule
+   338	    optim:
+   339	      all:
+   340	        lr: 0.0
+   341	        weight_decay: 1.0e-06
+   342	  CameraResponse:
+   343	    type: models.camera_response.MonotonicCameraResponse
+   344	    params:
+   345	      num_knots: 9
+   346	      min_slope: 0.05
+   347	    optim:
+   348	      all:
+   349	        lr: 0.001
+   350	    reg:
+   351	      identity:
+   352	        w: 0.001
+   353	      smoothness:
+   354	        w: 0.001
+   355	render:
+   356	  fps: 10
+   357	  render_full: false
+   358	  render_test: false
+   359	  render_novel: null
+   360	  vis_lidar: false
+   361	  vis_sky: false
+   362	  vis_error: false
+   363	logging:
+   364	  vis_freq: 0
+   365	  print_freq: 250
+   366	  saveckpt_freq: 5000
+   367	  save_seperate_video: true
+   368	data:
+   369	  data_root: data/waymo/processed/training
+   370	  dataset: waymo
+   371	  scene_idx: 94
+   372	  start_timestep: 0
+   373	  end_timestep: 99
+   374	  preload_device: cuda
+   375	  pixel_source:
+   376	    type: datasets.waymo.waymo_sourceloader.WaymoPixelSource
+   377	    cameras:
+   378	    - 0
+   379	    load_weather: []
+   380	    load_gbuffer: true
+   381	    gbuffer_path: data/waymo/render_png_094_single_static_100f/gbuffer_frames
+   382	    gbuffer_seq_id: 0
+   383	    downscale_when_loading:
+   384	    - 1
+   385	    downscale: 1
+   386	    undistort: true
+   387	    test_image_stride: 8
+   388	    load_sky_mask: true
+   389	    load_dynamic_mask: true
+   390	    load_objects: true
+   391	    load_smpl: true
+   392	    sampler:
+   393	      buffer_downscale: 8
+   394	      buffer_ratio: 0.5
+   395	      start_enhance_weight: 3
+   396	    gbuffer_crop_top: 0
+   397	    gbuffer_size:
+   398	    - 1280
+   399	    - 1920
+   400	  lidar_source:
+   401	    type: datasets.waymo.waymo_sourceloader.WaymoLiDARSource
+   402	    load_lidar: true
+   403	    only_use_top_lidar: false
+   404	    truncated_max_range: 80
+   405	    truncated_min_range: -2
+   406	    lidar_downsample_factor: 4
+   407	    lidar_percentile: 0.02
+   408	log_dir: output/pbr/base_v3_boundaries/scene_094_100f/combo_perceptual_02
+
